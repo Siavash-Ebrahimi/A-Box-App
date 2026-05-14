@@ -201,17 +201,16 @@ export async function POST(req) {
   }
 
   try {
-    // Run the four Overpass queries + the LLM factors call in parallel, but use allSettled
-    // so a flaky mirror or rate-limit on one optional query doesn't kill the whole analysis.
-    // Critical queries: competitors + commercial. Optional: geometries + enrichment.
+    // Phase 1 runs only Overpass queries (no LLM). Use allSettled so a flaky mirror
+    // on an optional query doesn't kill the whole analysis. Critical: competitors +
+    // commercial. Optional: geometries + enrichment.
     const settled = await Promise.allSettled([
       fetchCompetitors(businessType, latitude, longitude, radius),
       fetchCommercialActivity(latitude, longitude, radius),
       fetchStreetGeometries(latitude, longitude, radius),
       fetchEnrichment(latitude, longitude, radius),
-      generateCityFactors(businessType, cityHint),
     ]);
-    const [compR, commR, geoR, enrR, facR] = settled;
+    const [compR, commR, geoR, enrR] = settled;
 
     if (compR.status === "rejected" || commR.status === "rejected") {
       const reason = compR.status === "rejected" ? compR.reason?.message : commR.reason?.message;
@@ -230,9 +229,6 @@ export async function POST(req) {
     const commercial = commR.value;
     const geometries = geoR.status === "fulfilled" ? geoR.value : new Map();
     const enrichment = enrR.status === "fulfilled" ? enrR.value : { transit: [], anchors: [], residential: [] };
-    const factors = facR.status === "fulfilled"
-      ? facR.value
-      : { source: "template", text: "" };
 
     if (geoR.status === "rejected") console.warn("Street geometries unavailable:", geoR.reason?.message);
     if (enrR.status === "rejected") console.warn("Enrichment unavailable:", enrR.reason?.message);

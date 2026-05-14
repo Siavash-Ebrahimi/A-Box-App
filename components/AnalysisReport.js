@@ -37,9 +37,10 @@ export default function AnalysisReport({ result, category, loading, location }) 
         </header>
 
         <div className="flex-1 overflow-y-auto scrollbar-thin px-5 py-4 space-y-5">
-          {/* Skeleton appears whenever AI-content is still being generated:
-              either Phase 1 (`loading`) or Phase 2 (`result.enriching`). */}
-          {loading || (result && result.enriching && !result.report) ? <ReportSkeleton /> : null}
+          {/* Skeleton during Phase 1 (no result yet) OR Phase 2 (overview still pending). */}
+          {loading || (result && result.loadingOverview && !result.report) ? (
+            <ReportSkeleton />
+          ) : null}
 
           {!loading && result ? (
             <>
@@ -53,11 +54,13 @@ export default function AnalysisReport({ result, category, loading, location }) 
                 <RecommendationsList recs={result.recommendations} />
               ) : null}
               {result.agencies ? <PropertyAgencies agencies={result.agencies} /> : null}
-              {result.enrichError ? (
+              {(result.overviewError || result.detailsError) ? (
                 <div className="text-[11px] text-amber-300/80 leading-relaxed p-2.5 rounded border border-amber-500/30 bg-amber-500/5">
-                  AI enrichment didn't finish in time, so the executive report and detailed
-                  reasoning aren't available. The street ranking and recommendations are
-                  still fully accurate. Re-run the analysis to retry the AI content.
+                  {result.overviewError && result.detailsError
+                    ? "AI enrichment didn't finish in time. The street ranking and recommendations are still fully accurate — re-run to retry the AI layers."
+                    : result.overviewError
+                      ? "The market-overview AI layer didn't finish in time. Per-street paragraphs may still be on screen — re-run to retry."
+                      : "The per-street AI layer didn't finish in time. The executive report is still available — re-run to retry the detailed paragraphs."}
                 </div>
               ) : null}
             </>

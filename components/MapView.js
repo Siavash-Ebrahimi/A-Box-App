@@ -152,7 +152,13 @@ export default function MapView({
   recommendations = [],
   agencies = null,
   loading = false,
+  enriching = false,
+  phaseDone = 0,
 }) {
+  const busy = loading || enriching;
+  // Phase 1: Overpass+scoring; Phase 2/3: LLM overview + details running in parallel.
+  // phaseDone tells us how many of the 3 layers have completed so far.
+  const phase = loading ? 1 : enriching ? (phaseDone >= 2 ? 3 : 2) : 0;
   const allStreets = useMemo(
     () => [...(streets.gold || []), ...(streets.silver || []), ...(streets.bronze || [])],
     [streets],
@@ -294,12 +300,12 @@ export default function MapView({
           </Marker>
         ))}
 
-        {/* Radar effect — rings + sweep — while analysis is running. */}
-        <RadarOverlay center={center} radius={radius} active={loading} />
+        {/* Radar effect — runs through BOTH analysis phases (Phase 1: data, Phase 2: AI). */}
+        <RadarOverlay center={center} radius={radius} active={busy} />
 
         {/* Shop-opportunity markers along the top recommended streets. They link to live
             listings on the property portals (we don't host real-time inventory). */}
-        {!loading && recommendations.map((rec, i) =>
+        {!busy && recommendations.map((rec, i) =>
           shopSpotsForRec(rec, allStreets).map((sp, j) => (
             <Marker
               key={`shop-${i}-${j}`}
@@ -375,8 +381,8 @@ export default function MapView({
         <FlyTo target={focusTarget} />
       </MapContainer>
 
-      {/* Floating progress card (only while analysis is running). */}
-      <MapProgressCard active={loading} />
+      {/* Floating progress card — runs through all 3 phases with stage-aware messaging. */}
+      <MapProgressCard active={busy} phase={phase} phaseDone={phaseDone} />
 
       {/* Legend overlay. */}
       <div className="absolute bottom-4 right-4 z-[400] bg-slate-900/90 border border-slate-700 rounded-md px-3 py-2 text-[11px] text-slate-200 shadow-lg backdrop-blur">
@@ -575,28 +581,72 @@ function ShopOpportunityPopup({ rec, agencies }) {
 }
 
 // Floating progress card pinned to the top-center of the map while analysis runs.
-// Pairs with the RadarOverlay so the user sees BOTH a textual status AND the visual sweep.
-function MapProgressCard({ active }) {
+// `phase` is 1 (data fetch), 2 (overview LLM still running) or 3 (only details LLM left).
+// `phaseDone` is 1, 2 or 3 — how many of the three layers have finished so far.
+// The radar continues animating across all three phases, so the user keeps a clear
+// "system is working" cue until everything is on screen.
+function MapProgressCard({ active, phase = 0, phaseDone = 0 }) {
   const [seconds, setSeconds] = useState(0);
+  // Re-zero the timer at each phase transition.
   useEffect(() => {
     if (!active) { setSeconds(0); return; }
     const start = Date.now();
     const id = setInterval(() => setSeconds(Math.floor((Date.now() - start) / 1000)), 1000);
     return () => clearInterval(id);
-  }, [active]);
+  }, [active, phase]);
+
   if (!active) return null;
   const mm = String(Math.floor(seconds / 60));
   const ss = String(seconds % 60).padStart(2, "0");
   const dots = ".".repeat(seconds % 4);
+
+  const title =
+    phase === 1
+      ? "Step 1 of 3 · Reading the map"
+      : phase === 2
+        ? "Steps 2 & 3 of 3 · AI is writing your analysis"
+        : phase === 3
+          ? "Step 3 of 3 · Finalising per-street insights"
+          : "Processing your request";
+  const subtitle =
+    phase === 1
+      ? "Finding nearby businesses, scoring streets, building recommendations…"
+      : phase === 2
+        ? "Market overview and per-street insights are loading in parallel. Sections will appear layer by layer."
+        : phase === 3
+          ? "The market overview is on screen. Per-street paragraphs are landing now — almost done."
+          : "";
+
   return (
     <div className="absolute top-4 left-1/2 -translate-x-1/2 z-[500] pointer-events-none">
-      <div className="bg-slate-900/95 border border-cyan-500/40 rounded-lg shadow-2xl px-4 py-3 backdrop-blur min-w-[280px]">
+      <div className="bg-slate-900/95 border border-cyan-500/40 rounded-lg shadow-2xl px-4 py-3 backdrop-blur min-w-[320px] max-w-[440px]">
         <div className="flex items-center gap-2">
           <span className="inline-block w-2 h-2 rounded-full bg-cyan-400 animate-pulse" />
-          <span className="text-xs text-slate-100 font-medium">
-            Please wait, we are processing your request{dots}
+          <span className="text-xs text-cyan-300 font-semibold uppercase tracking-wider">
+            {title}{dots}
           </span>
           <span className="ml-auto text-[11px] text-slate-400 tabular-nums">T+ {mm}:{ss}</span>
+        </div>
+        {subtitle ? (
+          <div className="text-[11.5px] text-slate-300 leading-snug mt-1.5">{subtitle}</div>
+        ) : null}
+        {/* Tiny "1/3, 2/3, 3/3" progress dots for visual reassurance. */}
+        <div className="flex items-center gap-1.5 mt-2">
+          {[1, 2, 3].map((n) => (
+            <span
+              key={n}
+              className={`inline-block w-2 h-2 rounded-full ${
+                phaseDone >= n
+                  ? "bg-emerald-400"
+                  : phaseDone + 1 === n
+                    ? "bg-cyan-400 animate-pulse"
+                    : "bg-slate-700"
+              }`}
+            />
+          ))}
+          <span className="text-[10px] text-slate-500 ml-1">
+            {phaseDone} of 3 layers complete
+          </span>
         </div>
       </div>
     </div>

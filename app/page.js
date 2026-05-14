@@ -48,10 +48,12 @@ export default function Page() {
     setLocation(null);
   }
 
-  // Two-phase analysis so neither phase can ever exceed Vercel's 60-second function limit.
-  // Phase 1 (/api/analyze): Overpass + scoring + ranking + template explanations.
-  // Phase 2 (/api/enrich): all LLM-driven content (report, insights, agencies, etc.).
-  // The UI shows Phase-1 data immediately and upgrades to Phase-2 content as it arrives.
+  // Three-phase analysis to keep every individual request well inside Vercel's 60s limit:
+  //   Phase 1 (/api/analyze)          — Overpass + scoring + ranking. Sequential.
+  //   Phase 2 (/api/enrich-overview)  — Big-picture LLM (report + insights + agencies). Parallel with Phase 3.
+  //   Phase 3 (/api/enrich-details)   — Per-street + per-spot LLM. Parallel with Phase 2.
+  // Either Phase 2 or Phase 3 can fail without affecting the other; the UI fills in
+  // whichever layers succeed.
   async function analyze() {
     if (!location) return;
     setLoading(true);
@@ -60,7 +62,7 @@ export default function Page() {
     setFocused(null);
 
     try {
-      // --- Phase 1 ---
+      // --- Phase 1: data ---
       const phase1Res = await fetch("/api/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -75,47 +77,65 @@ export default function Page() {
       const phase1Data = await safeJson(phase1Res, "analysis");
       if (!phase1Res.ok) throw new Error(phase1Data?.error || `Analysis failed (HTTP ${phase1Res.status})`);
 
-      // Show Phase-1 results immediately; flag enriching so the UI knows AI content is incoming.
-      const initial = { ...phase1Data, enriching: true };
+      const initial = { ...phase1Data, loadingOverview: true, loadingDetails: true };
       setResult(initial);
       setLoading(false);
 
-      // --- Phase 2 (best-effort) ---
-      try {
-        const all = [
-          ...(phase1Data.gold || []),
-          ...(phase1Data.silver || []),
-          ...(phase1Data.bronze || []),
-        ];
-        const phase2Res = await fetch("/api/enrich", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            ...phase1Data.enrichContext,
-            topStreets: all.slice(0, 5).map((s) => ({
-              street: s.street,
-              tier: s.tier,
-              score: s.score,
-              breakdown: s.breakdown,
-              highway: s.highway,
-              center: s.center,
-            })),
-            recommendations: phase1Data.recommendations || [],
-            meta: phase1Data.meta || {},
-          }),
-        });
-        const phase2Data = await safeJson(phase2Res, "AI enrichment");
-        if (!phase2Res.ok) throw new Error(phase2Data?.error || `Enrich failed (HTTP ${phase2Res.status})`);
+      // Build the payload shared by Phase 2 and Phase 3.
+      const all = [
+        ...(phase1Data.gold || []),
+        ...(phase1Data.silver || []),
+        ...(phase1Data.bronze || []),
+      ];
+      const topStreets = all.slice(0, 5).map((s) => ({
+        street: s.street,
+        tier: s.tier,
+        score: s.score,
+        breakdown: s.breakdown,
+        highway: s.highway,
+        center: s.center,
+      }));
+      const ctx = phase1Data.enrichContext || {};
+      const meta = phase1Data.meta || {};
+      const recommendations = phase1Data.recommendations || [];
 
-        setResult((prev) => mergeEnrichment(prev, phase2Data));
-      } catch (enrichErr) {
-        // Phase-2 failure is non-fatal — Phase-1 data is still on screen. Just flag it.
-        setResult((prev) =>
-          prev
-            ? { ...prev, enriching: false, enrichError: enrichErr.message || "AI enrichment unavailable" }
-            : prev,
-        );
-      }
+      // --- Phase 2: overview (best-effort) ---
+      fetch("/api/enrich-overview", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...ctx, topStreets, meta }),
+      })
+        .then((res) => safeJson(res, "overview").then((data) => ({ res, data })))
+        .then(({ res, data }) => {
+          if (!res.ok) throw new Error(data?.error || `Overview failed (HTTP ${res.status})`);
+          setResult((prev) => mergeOverview(prev, data));
+        })
+        .catch((err) => {
+          setResult((prev) =>
+            prev
+              ? { ...prev, loadingOverview: false, overviewError: err.message || "Overview unavailable" }
+              : prev,
+          );
+        });
+
+      // --- Phase 3: details (best-effort, runs in parallel with Phase 2) ---
+      fetch("/api/enrich-details", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...ctx, topStreets, recommendations }),
+      })
+        .then((res) => safeJson(res, "details").then((data) => ({ res, data })))
+        .then(({ res, data }) => {
+          if (!res.ok) throw new Error(data?.error || `Details failed (HTTP ${res.status})`);
+          setResult((prev) => mergeDetails(prev, data));
+        })
+        .catch((err) => {
+          setResult((prev) =>
+            prev
+              ? { ...prev, loadingDetails: false, detailsError: err.message || "Details unavailable" }
+              : prev,
+          );
+        });
     } catch (e) {
       setError(e.message);
       setLoading(false);
@@ -203,9 +223,24 @@ export default function Page() {
         {/* Standalone Recommendation block removed — Final Recommendation now lives in
             the AI Analytics Report on the right panel. */}
 
+        {result && (result.loadingOverview || result.loadingDetails) ? (
+          <div className="mx-5 my-3 p-3 rounded border border-cyan-500/40 bg-cyan-500/10 text-cyan-100 text-xs leading-relaxed">
+            <div className="flex items-center gap-2">
+              <span className="inline-block w-2 h-2 rounded-full bg-cyan-400 animate-pulse" />
+              <span className="text-[10px] uppercase tracking-wider text-cyan-300 font-semibold">
+                {phaseLabel(result)}
+              </span>
+            </div>
+            <div className="mt-1.5 text-slate-200">
+              The street map is ready. Analysis layers fill in as they arrive —
+              <span className="text-cyan-200"> {layersDoneOf(result)} of 3 layers complete</span>.
+            </div>
+          </div>
+        ) : null}
+
         {/* Successful Businesses Nearby — appears once Phase 1 is done; the *content*
-            of the LLM-written insight upgrades automatically when Phase 2 returns. */}
-        {result && (result.competitorInsights || result.enriching) ? (
+            of the LLM-written insight upgrades automatically when Phase 2 (overview) returns. */}
+        {result && (result.competitorInsights || result.loadingOverview) ? (
           <div className="mx-5 my-3 p-3 rounded border border-slate-700 bg-slate-900/60 text-slate-200 text-xs leading-relaxed">
             <div className="flex items-center justify-between mb-2 gap-2">
               <div className="text-[10px] uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
@@ -305,6 +340,8 @@ export default function Page() {
             recommendations={result?.recommendations || []}
             agencies={result?.agencies || null}
             loading={loading}
+            enriching={!!(result?.loadingOverview || result?.loadingDetails)}
+            phaseDone={result ? layersDoneOf(result) : 0}
           />
         ) : (
           <div className="h-full flex items-center justify-center text-slate-500 text-sm">
@@ -329,6 +366,27 @@ export default function Page() {
   );
 }
 
+// How many of the 3 layers (Phase 1 / overview / details) have finished.
+// Used to drive the "X of 3 layers complete" message in the sidebar banner.
+function layersDoneOf(result) {
+  if (!result) return 0;
+  let n = 1; // Phase 1 always done if we have a result
+  if (!result.loadingOverview) n++;
+  if (!result.loadingDetails) n++;
+  return n;
+}
+
+// Short status label that reflects the most informative still-running phase.
+function phaseLabel(result) {
+  if (!result) return "Step 1 of 3 · Reading the map";
+  if (result.loadingOverview && result.loadingDetails) {
+    return "Steps 2 & 3 of 3 · AI is writing your analysis";
+  }
+  if (result.loadingOverview) return "Step 2 of 3 · Generating market overview";
+  if (result.loadingDetails) return "Step 3 of 3 · Writing per-street insights";
+  return "Analysis complete";
+}
+
 // Tolerant JSON reader: if the server returns plain text (Vercel timeout, gateway error,
 // etc.), we surface a useful, actionable message instead of "Unexpected token 'A'".
 async function safeJson(res, label = "request") {
@@ -348,33 +406,42 @@ async function safeJson(res, label = "request") {
   }
 }
 
-// Merge Phase-2 LLM enrichment into the existing Phase-1 result, upgrading template
-// content with LLM content where available. Anything Phase 2 didn't produce keeps the
-// Phase-1 fallback so the UI stays fully usable.
-function mergeEnrichment(prev, enrich) {
+// Merge Phase-2 overview response into the result. Anything Phase 2 didn't produce
+// keeps the Phase-1 fallback so the UI stays usable.
+function mergeOverview(prev, data) {
   if (!prev) return prev;
-  const out = { ...prev, enriching: false, enrichError: null };
-  if (enrich.report) out.report = enrich.report;
-  if (enrich.competitorInsights) out.competitorInsights = enrich.competitorInsights;
-  if (enrich.successFactors) out.successFactors = enrich.successFactors;
-  if (enrich.agencies) out.agencies = enrich.agencies;
+  return {
+    ...prev,
+    report: data.report || prev.report,
+    competitorInsights: data.competitorInsights || prev.competitorInsights,
+    successFactors: data.successFactors || prev.successFactors,
+    agencies: data.agencies || prev.agencies,
+    loadingOverview: false,
+    overviewError: null,
+  };
+}
 
-  // Per-street explanations: replace the template paragraph for streets that got an LLM one.
-  const byStreet = new Map((enrich.explanations || []).map((e) => [e.street, e]));
+// Merge Phase-3 details response into the result. Upgrades the template per-street
+// paragraphs with LLM-written ones, and attaches "why this spot" reasoning to each rec.
+function mergeDetails(prev, data) {
+  if (!prev) return prev;
+  const byStreet = new Map((data.explanations || []).map((e) => [e.street, e]));
   const upgrade = (s) => {
     const m = byStreet.get(s.street);
     return m ? { ...s, explanation: m.text, explanationSource: m.source } : s;
   };
-  out.gold = (prev.gold || []).map(upgrade);
-  out.silver = (prev.silver || []).map(upgrade);
-  out.bronze = (prev.bronze || []).map(upgrade);
-
-  // Recommendation reasoning: index-aligned with prev.recommendations.
-  out.recommendations = (prev.recommendations || []).map((r, i) => {
-    const reason = enrich.recReasons?.[i];
-    return reason ? { ...r, reason: reason.text, reasonSource: reason.source } : r;
-  });
-  return out;
+  return {
+    ...prev,
+    gold: (prev.gold || []).map(upgrade),
+    silver: (prev.silver || []).map(upgrade),
+    bronze: (prev.bronze || []).map(upgrade),
+    recommendations: (prev.recommendations || []).map((r, i) => {
+      const reason = data.recReasons?.[i];
+      return reason ? { ...r, reason: reason.text, reasonSource: reason.source } : r;
+    }),
+    loadingDetails: false,
+    detailsError: null,
+  };
 }
 
 // Inline copy of the red drop-pin used on the map (the `comp-pin` shape) — kept as a small
@@ -394,11 +461,13 @@ function CompetitorPinIcon() {
   );
 }
 
-// User-friendly messages — no technical jargon. The user just wants to know we're working.
+// Phase-1 progress message. Phase 2 (overview) and Phase 3 (details) progress appear
+// as separate banners once Phase 1 finishes — the user sees the analysis fill in
+// layer by layer across the 3 phases.
 const STAGES = [
-  { until: 999, text: "Please wait, we are processing your request" },
+  { until: 999, text: "Step 1 of 3 · Reading the map" },
 ];
-const SOFT_ETA_SECONDS = 45;
+const SOFT_ETA_SECONDS = 25;
 
 function AnalyzingProgress() {
   const [seconds, setSeconds] = useState(0);
