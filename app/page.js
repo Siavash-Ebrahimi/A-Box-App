@@ -66,8 +66,26 @@ export default function Page() {
           cityHint: location.city || null,
         }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Analysis failed");
+
+      // The server might return plain text on a serverless timeout (Vercel 60s limit)
+      // — e.g. "An error occurred with this application." That isn't JSON, so we
+      // peek at the body as text first and report a useful message instead of
+      // the cryptic "Unexpected token 'A'" you get from blind JSON.parse.
+      const rawText = await res.text();
+      let data = null;
+      try {
+        data = rawText ? JSON.parse(rawText) : null;
+      } catch {
+        if (res.status === 504 || res.status === 502 || rawText.startsWith("An error")) {
+          throw new Error(
+            "The analysis took too long and was cut off by the server (likely a 60-second timeout). Try a smaller radius (500 m), or retry — the second attempt is usually faster because the LLM caches the request.",
+          );
+        }
+        throw new Error(
+          `Server returned a non-JSON response (HTTP ${res.status}). First 120 chars: ${rawText.slice(0, 120)}`,
+        );
+      }
+      if (!res.ok) throw new Error((data && data.error) || `Analysis failed (HTTP ${res.status})`);
       setResult(data);
     } catch (e) {
       setError(e.message);

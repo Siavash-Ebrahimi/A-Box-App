@@ -315,8 +315,18 @@ export async function POST(req) {
 
     // Per-street paragraph for every colored street + structured 4-section executive report
     // + competitor insights + property agency lookup, all in parallel.
+    //
+    // To stay inside Vercel's 60s serverless-function timeout, only the top
+    // LLM_EXPLAIN_TOP_N streets get an LLM-written per-street paragraph; lower-ranked
+    // streets fall back to the (instant, deterministic) template. The 3 recommendation
+    // spots are always within the top N, so they still get full LLM reasoning.
+    const LLM_EXPLAIN_TOP_N = 5;
     const [explanations, report, competitorInsights, agencies] = await Promise.all([
-      Promise.all(ranked.map((s) => explainStreet(businessType, s))),
+      Promise.all(
+        ranked.map((s, i) =>
+          explainStreet(businessType, s, { skipLLM: i >= LLM_EXPLAIN_TOP_N }),
+        ),
+      ),
       generateOverallReport(businessType, ranked, cityHint, reportExtras),
       generateCompetitorInsights(businessType, ranked, cityHint, reportExtras),
       findPropertyAgencies(businessType, cityHint, null, { lat: latitude, lon: longitude }).catch(() => ({
