@@ -42,11 +42,11 @@ export default function HomeScreen({ onChooseBusiness }) {
         {/* 3 main option buttons */}
         <div className="grid sm:grid-cols-3 gap-4">
           <OptionButton
-            disabled
+            accent="emerald"
             icon={<HouseIcon />}
             title="Property"
             subtitle="Buy · Sell · Rent · Airbnb"
-            note="Coming soon"
+            href="/property"
           />
           <OptionButton
             accent="amber"
@@ -93,6 +93,15 @@ const ACCENTS = {
     title:    "text-cyan-200",
     subtitle: "text-cyan-300/70",
     cta:      "text-cyan-300",
+  },
+  emerald: {
+    border:   "border-emerald-500/50 hover:border-emerald-400",
+    bg:       "bg-emerald-500/10 hover:bg-emerald-500/20",
+    shadow:   "shadow-emerald-500/10",
+    iconBg:   "bg-emerald-500/20 text-emerald-300",
+    title:    "text-emerald-200",
+    subtitle: "text-emerald-300/70",
+    cta:      "text-emerald-300",
   },
 };
 
