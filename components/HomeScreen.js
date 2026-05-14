@@ -49,18 +49,18 @@ export default function HomeScreen({ onChooseBusiness }) {
             note="Coming soon"
           />
           <OptionButton
-            primary
+            accent="amber"
             icon={<BusinessIcon />}
             title="Business"
             subtitle="Find the best street to open"
             onClick={onChooseBusiness}
           />
           <OptionButton
-            disabled
+            accent="cyan"
             icon={<AgentIcon />}
             title="Agent Hub"
             subtitle="Tools for real-estate agents"
-            note="Coming soon"
+            href="/agent-hub"
           />
         </div>
 
@@ -72,25 +72,53 @@ export default function HomeScreen({ onChooseBusiness }) {
   );
 }
 
-function OptionButton({ disabled, primary, icon, title, subtitle, note, onClick }) {
+// Per-accent colour set. Each active option button picks one (amber for Business,
+// cyan for Agent Hub) so they share the same hover/scale effect but stay visually
+// distinct. Disabled options ignore accent and use the muted slate palette.
+const ACCENTS = {
+  amber: {
+    border:   "border-amber-500/50 hover:border-amber-400",
+    bg:       "bg-amber-500/10 hover:bg-amber-500/20",
+    shadow:   "shadow-amber-500/10",
+    iconBg:   "bg-amber-500/20 text-amber-300",
+    title:    "text-amber-200",
+    subtitle: "text-amber-300/70",
+    cta:      "text-amber-300",
+  },
+  cyan: {
+    border:   "border-cyan-500/50 hover:border-cyan-400",
+    bg:       "bg-cyan-500/10 hover:bg-cyan-500/20",
+    shadow:   "shadow-cyan-500/10",
+    iconBg:   "bg-cyan-500/20 text-cyan-300",
+    title:    "text-cyan-200",
+    subtitle: "text-cyan-300/70",
+    cta:      "text-cyan-300",
+  },
+};
+
+function OptionButton({ disabled, accent, icon, title, subtitle, note, onClick, href }) {
+  const Tag = href && !disabled ? "a" : "button";
+  const navProps = href && !disabled
+    ? { href }
+    : { type: "button", onClick: disabled ? undefined : onClick, disabled };
+  const a = ACCENTS[accent];
+
   return (
-    <button
-      type="button"
-      onClick={disabled ? undefined : onClick}
-      disabled={disabled}
+    <Tag
+      {...navProps}
       className={[
-        "p-5 rounded-xl text-left border transition-all relative overflow-hidden",
+        "p-5 rounded-xl text-left border transition-all relative overflow-hidden block",
         disabled
           ? "border-slate-800 bg-slate-900/40 cursor-not-allowed"
-          : primary
-            ? "border-amber-500/50 bg-amber-500/10 hover:bg-amber-500/20 hover:border-amber-400 hover:scale-[1.02] shadow-lg shadow-amber-500/10"
+          : a
+            ? `${a.border} ${a.bg} hover:scale-[1.02] shadow-lg ${a.shadow}`
             : "border-slate-700 bg-slate-900/60 hover:border-slate-500 hover:bg-slate-900",
       ].join(" ")}
     >
       <div
         className={[
           "mb-3 w-10 h-10 rounded-lg flex items-center justify-center",
-          disabled ? "bg-slate-800 text-slate-500" : primary ? "bg-amber-500/20 text-amber-300" : "bg-slate-800 text-slate-200",
+          disabled ? "bg-slate-800 text-slate-500" : a ? a.iconBg : "bg-slate-800 text-slate-200",
         ].join(" ")}
       >
         {icon}
@@ -98,7 +126,7 @@ function OptionButton({ disabled, primary, icon, title, subtitle, note, onClick 
       <div
         className={[
           "font-semibold text-base",
-          disabled ? "text-slate-400" : primary ? "text-amber-200" : "text-slate-100",
+          disabled ? "text-slate-400" : a ? a.title : "text-slate-100",
         ].join(" ")}
       >
         {title}
@@ -106,19 +134,19 @@ function OptionButton({ disabled, primary, icon, title, subtitle, note, onClick 
       <div
         className={[
           "text-xs mt-1",
-          disabled ? "text-slate-600" : primary ? "text-amber-300/70" : "text-slate-400",
+          disabled ? "text-slate-600" : a ? a.subtitle : "text-slate-400",
         ].join(" ")}
       >
         {subtitle}
       </div>
       {note ? (
         <div className="text-[10px] uppercase tracking-wider text-slate-500 mt-2 italic">{note}</div>
-      ) : primary ? (
-        <div className="text-[10px] uppercase tracking-wider text-amber-300 mt-2 font-semibold">
+      ) : a ? (
+        <div className={`text-[10px] uppercase tracking-wider mt-2 font-semibold ${a.cta}`}>
           Start →
         </div>
       ) : null}
-    </button>
+    </Tag>
   );
 }
 
