@@ -37,18 +37,29 @@ export default function AnalysisReport({ result, category, loading, location }) 
         </header>
 
         <div className="flex-1 overflow-y-auto scrollbar-thin px-5 py-4 space-y-5">
-          {loading ? <ReportSkeleton /> : null}
+          {/* Skeleton appears whenever AI-content is still being generated:
+              either Phase 1 (`loading`) or Phase 2 (`result.enriching`). */}
+          {loading || (result && result.enriching && !result.report) ? <ReportSkeleton /> : null}
 
           {!loading && result ? (
             <>
-              <ReportPreview
-                sections={result.report?.sections}
-                onShowFull={() => setShowFull(true)}
-              />
+              {result.report ? (
+                <ReportPreview
+                  sections={result.report?.sections}
+                  onShowFull={() => setShowFull(true)}
+                />
+              ) : null}
               {result.recommendations?.length ? (
                 <RecommendationsList recs={result.recommendations} />
               ) : null}
               {result.agencies ? <PropertyAgencies agencies={result.agencies} /> : null}
+              {result.enrichError ? (
+                <div className="text-[11px] text-amber-300/80 leading-relaxed p-2.5 rounded border border-amber-500/30 bg-amber-500/5">
+                  AI enrichment didn't finish in time, so the executive report and detailed
+                  reasoning aren't available. The street ranking and recommendations are
+                  still fully accurate. Re-run the analysis to retry the AI content.
+                </div>
+              ) : null}
             </>
           ) : null}
         </div>

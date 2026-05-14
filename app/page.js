@@ -48,14 +48,20 @@ export default function Page() {
     setLocation(null);
   }
 
+  // Two-phase analysis so neither phase can ever exceed Vercel's 60-second function limit.
+  // Phase 1 (/api/analyze): Overpass + scoring + ranking + template explanations.
+  // Phase 2 (/api/enrich): all LLM-driven content (report, insights, agencies, etc.).
+  // The UI shows Phase-1 data immediately and upgrades to Phase-2 content as it arrives.
   async function analyze() {
     if (!location) return;
     setLoading(true);
     setError(null);
     setResult(null);
     setFocused(null);
+
     try {
-      const res = await fetch("/api/analyze", {
+      // --- Phase 1 ---
+      const phase1Res = await fetch("/api/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -66,30 +72,52 @@ export default function Page() {
           cityHint: location.city || null,
         }),
       });
+      const phase1Data = await safeJson(phase1Res, "analysis");
+      if (!phase1Res.ok) throw new Error(phase1Data?.error || `Analysis failed (HTTP ${phase1Res.status})`);
 
-      // The server might return plain text on a serverless timeout (Vercel 60s limit)
-      // — e.g. "An error occurred with this application." That isn't JSON, so we
-      // peek at the body as text first and report a useful message instead of
-      // the cryptic "Unexpected token 'A'" you get from blind JSON.parse.
-      const rawText = await res.text();
-      let data = null;
+      // Show Phase-1 results immediately; flag enriching so the UI knows AI content is incoming.
+      const initial = { ...phase1Data, enriching: true };
+      setResult(initial);
+      setLoading(false);
+
+      // --- Phase 2 (best-effort) ---
       try {
-        data = rawText ? JSON.parse(rawText) : null;
-      } catch {
-        if (res.status === 504 || res.status === 502 || rawText.startsWith("An error")) {
-          throw new Error(
-            "The analysis took too long and was cut off by the server (likely a 60-second timeout). Try a smaller radius (500 m), or retry — the second attempt is usually faster because the LLM caches the request.",
-          );
-        }
-        throw new Error(
-          `Server returned a non-JSON response (HTTP ${res.status}). First 120 chars: ${rawText.slice(0, 120)}`,
+        const all = [
+          ...(phase1Data.gold || []),
+          ...(phase1Data.silver || []),
+          ...(phase1Data.bronze || []),
+        ];
+        const phase2Res = await fetch("/api/enrich", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            ...phase1Data.enrichContext,
+            topStreets: all.slice(0, 5).map((s) => ({
+              street: s.street,
+              tier: s.tier,
+              score: s.score,
+              breakdown: s.breakdown,
+              highway: s.highway,
+              center: s.center,
+            })),
+            recommendations: phase1Data.recommendations || [],
+            meta: phase1Data.meta || {},
+          }),
+        });
+        const phase2Data = await safeJson(phase2Res, "AI enrichment");
+        if (!phase2Res.ok) throw new Error(phase2Data?.error || `Enrich failed (HTTP ${phase2Res.status})`);
+
+        setResult((prev) => mergeEnrichment(prev, phase2Data));
+      } catch (enrichErr) {
+        // Phase-2 failure is non-fatal — Phase-1 data is still on screen. Just flag it.
+        setResult((prev) =>
+          prev
+            ? { ...prev, enriching: false, enrichError: enrichErr.message || "AI enrichment unavailable" }
+            : prev,
         );
       }
-      if (!res.ok) throw new Error((data && data.error) || `Analysis failed (HTTP ${res.status})`);
-      setResult(data);
     } catch (e) {
       setError(e.message);
-    } finally {
       setLoading(false);
     }
   }
@@ -175,7 +203,9 @@ export default function Page() {
         {/* Standalone Recommendation block removed — Final Recommendation now lives in
             the AI Analytics Report on the right panel. */}
 
-        {result?.competitorInsights ? (
+        {/* Successful Businesses Nearby — appears once Phase 1 is done; the *content*
+            of the LLM-written insight upgrades automatically when Phase 2 returns. */}
+        {result && (result.competitorInsights || result.enriching) ? (
           <div className="mx-5 my-3 p-3 rounded border border-slate-700 bg-slate-900/60 text-slate-200 text-xs leading-relaxed">
             <div className="flex items-center justify-between mb-2 gap-2">
               <div className="text-[10px] uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
@@ -183,21 +213,31 @@ export default function Page() {
                 <span>Successful Businesses Nearby</span>
               </div>
               <span className="text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-slate-800 text-slate-400 whitespace-nowrap">
-                {result.competitorInsights.source}
+                {result.competitorInsights?.source || "loading…"}
               </span>
             </div>
-            <div className="text-slate-200 leading-snug clamp-5">
-              {result.competitorInsights.summary}
-            </div>
-            {result.competitorInsights.details ? (
-              <button
-                type="button"
-                onClick={() => setShowCompetitorModal(true)}
-                className="mt-2 text-[11px] px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 transition"
-              >
-                Read More →
-              </button>
-            ) : null}
+            {result.competitorInsights ? (
+              <>
+                <div className="text-slate-200 leading-snug clamp-5">
+                  {result.competitorInsights.summary}
+                </div>
+                {result.competitorInsights.details ? (
+                  <button
+                    type="button"
+                    onClick={() => setShowCompetitorModal(true)}
+                    className="mt-2 text-[11px] px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 transition"
+                  >
+                    Read More →
+                  </button>
+                ) : null}
+              </>
+            ) : (
+              <div className="space-y-1.5">
+                <div className="h-2.5 w-11/12 bg-slate-800 rounded animate-pulse" />
+                <div className="h-2.5 w-full bg-slate-800 rounded animate-pulse" />
+                <div className="h-2.5 w-3/4 bg-slate-800 rounded animate-pulse" />
+              </div>
+            )}
           </div>
         ) : null}
 
@@ -287,6 +327,54 @@ export default function Page() {
       ) : null}
     </div>
   );
+}
+
+// Tolerant JSON reader: if the server returns plain text (Vercel timeout, gateway error,
+// etc.), we surface a useful, actionable message instead of "Unexpected token 'A'".
+async function safeJson(res, label = "request") {
+  const text = await res.text();
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    if (res.status === 504 || res.status === 502 || text.startsWith("An error")) {
+      throw new Error(
+        `The ${label} took too long and was cut off by the server (likely a 60-second timeout). Try a smaller radius (500 m) or retry — second attempts are usually faster.`,
+      );
+    }
+    throw new Error(
+      `Server returned a non-JSON response (HTTP ${res.status}). First 120 chars: ${text.slice(0, 120)}`,
+    );
+  }
+}
+
+// Merge Phase-2 LLM enrichment into the existing Phase-1 result, upgrading template
+// content with LLM content where available. Anything Phase 2 didn't produce keeps the
+// Phase-1 fallback so the UI stays fully usable.
+function mergeEnrichment(prev, enrich) {
+  if (!prev) return prev;
+  const out = { ...prev, enriching: false, enrichError: null };
+  if (enrich.report) out.report = enrich.report;
+  if (enrich.competitorInsights) out.competitorInsights = enrich.competitorInsights;
+  if (enrich.successFactors) out.successFactors = enrich.successFactors;
+  if (enrich.agencies) out.agencies = enrich.agencies;
+
+  // Per-street explanations: replace the template paragraph for streets that got an LLM one.
+  const byStreet = new Map((enrich.explanations || []).map((e) => [e.street, e]));
+  const upgrade = (s) => {
+    const m = byStreet.get(s.street);
+    return m ? { ...s, explanation: m.text, explanationSource: m.source } : s;
+  };
+  out.gold = (prev.gold || []).map(upgrade);
+  out.silver = (prev.silver || []).map(upgrade);
+  out.bronze = (prev.bronze || []).map(upgrade);
+
+  // Recommendation reasoning: index-aligned with prev.recommendations.
+  out.recommendations = (prev.recommendations || []).map((r, i) => {
+    const reason = enrich.recReasons?.[i];
+    return reason ? { ...r, reason: reason.text, reasonSource: reason.source } : r;
+  });
+  return out;
 }
 
 // Inline copy of the red drop-pin used on the map (the `comp-pin` shape) — kept as a small

@@ -1,6 +1,13 @@
-// POST /api/analyze
-// Body: { latitude, longitude, radius, businessType, cityHint? }
-// Returns: { gold, silver, bronze, recommendation, successFactors, meta }
+// POST /api/analyze — PHASE 1 of a two-phase analysis flow.
+//
+// This phase contains ONLY deterministic / non-LLM work (Overpass queries, scoring,
+// street ranking, template explanations). It always completes inside Vercel's 60s
+// serverless-function limit because no slow LLM calls are made here.
+//
+// PHASE 2 (LLM enrichment — executive report, competitor insights, property agency
+// search, per-street paragraphs, recommendation reasoning) lives in /api/enrich and
+// runs separately from the frontend after this endpoint returns. That way neither
+// phase alone can ever exceed the timeout.
 
 import { NextResponse } from "next/server";
 import {
@@ -13,13 +20,8 @@ import { fetchEnrichment } from "@/lib/enrichment";
 import { groupByStreet } from "@/lib/streets";
 import { scoreStreet } from "@/lib/scoring";
 import { weightsFor } from "@/lib/categoryWeights";
-import { findPropertyAgencies } from "@/lib/propertySearch";
 import {
   explainStreet,
-  generateCityFactors,
-  generateOverallReport,
-  generateRecommendationReasoning,
-  generateCompetitorInsights,
   buildFinalRecommendation,
   aiProviderStatus,
 } from "@/lib/ai";
@@ -300,41 +302,19 @@ export async function POST(req) {
       }
     }
 
-    // Build extras for the LLM-driven artefacts so they have full context.
+    // Sample competitor names — used by Phase 2 (enrich) for the LLM prompts.
     const competitorSampleNames = competitors
       .map((c) => c.name)
       .filter((n) => n && !n.startsWith("shop:") && !n.startsWith("amenity:"));
-    const reportExtras = {
-      totalCommercial: commercial.length,
-      totalCompetitors: competitors.length,
-      transitStops: enrichment.transit.length,
-      anchors: enrichment.anchors.length,
-      residentialBuildings: enrichment.residential.length,
-      competitorSampleNames,
-    };
 
-    // Per-street paragraph for every colored street + structured 4-section executive report
-    // + competitor insights + property agency lookup, all in parallel.
-    //
-    // To stay inside Vercel's 60s serverless-function timeout, only the top
-    // LLM_EXPLAIN_TOP_N streets get an LLM-written per-street paragraph; lower-ranked
-    // streets fall back to the (instant, deterministic) template. The 3 recommendation
-    // spots are always within the top N, so they still get full LLM reasoning.
-    const LLM_EXPLAIN_TOP_N = 5;
-    const [explanations, report, competitorInsights, agencies] = await Promise.all([
-      Promise.all(
-        ranked.map((s, i) =>
-          explainStreet(businessType, s, { skipLLM: i >= LLM_EXPLAIN_TOP_N }),
-        ),
-      ),
-      generateOverallReport(businessType, ranked, cityHint, reportExtras),
-      generateCompetitorInsights(businessType, ranked, cityHint, reportExtras),
-      findPropertyAgencies(businessType, cityHint, null, { lat: latitude, lon: longitude }).catch(() => ({
-        source: "error",
-        agencies: [],
-      })),
-    ]);
-    explanations.forEach((e, i) => {
+    // Template explanation for every street (instant, deterministic). Phase 2 will
+    // upgrade the top streets with LLM-written paragraphs and merge them back in.
+    const explanations = ranked.map((s) =>
+      explainStreet(businessType, s, { skipLLM: true }),
+    );
+    // explainStreet with skipLLM is synchronous; resolve the promises:
+    const resolvedExplanations = await Promise.all(explanations);
+    resolvedExplanations.forEach((e, i) => {
       ranked[i].explanation = e.text;
       ranked[i].explanationSource = e.source;
     });
@@ -406,23 +386,30 @@ export async function POST(req) {
       }
     }
 
-    const recReasons = await Promise.all(
-      recommendationDrafts.map((r) => generateRecommendationReasoning(businessType, r, cityHint)),
-    );
-    const recommendations = recommendationDrafts.map((r, i) => ({
-      ...r,
-      reason: recReasons[i].text,
-      reasonSource: recReasons[i].source,
-    }));
+    // Recommendation reasoning is an LLM call — it moves to Phase 2 (/api/enrich).
+    // For now we ship the drafts without `reason`; the frontend will request enrich
+    // and merge the reasoning when it arrives.
+    const recommendations = recommendationDrafts;
 
     return NextResponse.json({
       ...buckets,
       recommendation: buildFinalRecommendation(businessType, ranked),
       recommendations,
-      successFactors: factors,
-      competitorInsights,
-      report,
-      agencies,
+      // These four fields are intentionally NOT populated here — they come from
+      // Phase 2 (/api/enrich). The frontend treats their absence as "loading".
+      successFactors: null,
+      competitorInsights: null,
+      report: null,
+      agencies: null,
+      // Phase-2 context: re-sent verbatim to /api/enrich so it has everything it needs
+      // without re-running Overpass.
+      enrichContext: {
+        businessType,
+        cityHint: cityHint || null,
+        latitude,
+        longitude,
+        competitorSampleNames,
+      },
       meta: {
         totalCommercial: commercial.length,
         totalCompetitors: competitors.length,
