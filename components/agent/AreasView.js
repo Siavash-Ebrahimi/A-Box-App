@@ -1,7 +1,7 @@
 "use client";
 
 import dynamic from "next/dynamic";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { PROPERTIES } from "@/lib/agent/mockProperties";
 import {
   FREE_TIER_MAX_ZONES,
@@ -13,6 +13,9 @@ import {
   loadZoneBusinessSummaries,
   updateZoneBusinessSummary,
   clearZoneBusinessSummary,
+  loadFavoriteRecommendations,
+  toggleFavoriteRecommendation,
+  recommendationKey,
 } from "@/lib/agent/storage";
 import { metersBetween } from "@/lib/agent/distance";
 import { fillPerFilterSynthetics } from "@/lib/property/synthetic";
@@ -30,6 +33,7 @@ import ZoneRibbonsStack from "./ZoneRibbonsStack";
 const AreaMap = dynamic(() => import("./AreaMap"), { ssr: false });
 const LocationPicker = dynamic(() => import("@/components/LocationPicker"), { ssr: false });
 const FullAnalysisModal = dynamic(() => import("@/components/FullAnalysisModal"), { ssr: false });
+const ZoneBusinessAnalysisPanel = dynamic(() => import("./ZoneBusinessAnalysisPanel"), { ssr: false });
 
 const RADIUS_PRESETS = [
   { value: 500,  label: "500 m"  },
@@ -69,6 +73,30 @@ export default function AreasView({
   const [mode, setMode] = useState(MODE.IDLE);
   const [editZoneId, setEditZoneId] = useState(null);
   const [selectedZoneId, setSelectedZoneId] = useState(null);
+  // "Show all my Zones" overview toggle. Mutually exclusive with a single
+  // selectedZoneId — turning either on clears the other so the user always
+  // has exactly one viewing mode active.
+  const [showAllZones, setShowAllZones] = useState(false);
+
+  // Auto-select a newly saved zone. We compare the current zones[] against
+  // a ref of last-seen IDs; any ID that wasn't there last time is treated as
+  // freshly created and becomes the selection. Initial mount is intentionally
+  // a no-op so loading saved zones from localStorage doesn't fire a focus.
+  const prevZoneIdsRef = useRef(null);
+  useEffect(() => {
+    const currIds = zones.map((z) => z.id);
+    if (prevZoneIdsRef.current === null) {
+      prevZoneIdsRef.current = currIds;
+      return;
+    }
+    const prevSet = new Set(prevZoneIdsRef.current);
+    const newOnes = currIds.filter((id) => !prevSet.has(id));
+    if (newOnes.length > 0) {
+      setSelectedZoneId(newOnes[newOnes.length - 1]);
+      setShowAllZones(false);
+    }
+    prevZoneIdsRef.current = currIds;
+  }, [zones]);
 
   // ---- Pending-zone config (only used while mode === ADD)
   const [pending, setPending] = useState(null);
@@ -100,12 +128,25 @@ export default function AreasView({
   }, []);
   const allProperties = useMemo(() => [...PROPERTIES, ...userProperties], [userProperties]);
 
-  // ---- Favourites
+  // ---- Favourites (property pins)
   const [favourites, setFavourites] = useState(() => new Set());
   useEffect(() => { setFavourites(loadFavourites()); }, []);
   function toggleFavourite(propertyId) {
     persistToggleFavourite(propertyId);
     setFavourites(loadFavourites());
+  }
+
+  // ---- Favourited business-analysis recommendations (per zone)
+  const [favRecsByZone, setFavRecsByZone] = useState({});
+  useEffect(() => { setFavRecsByZone(loadFavoriteRecommendations()); }, []);
+  function toggleFavRec(zoneId, rec) {
+    const next = toggleFavoriteRecommendation(zoneId, rec);
+    setFavRecsByZone(next);
+  }
+  function isFavRec(zoneId, rec) {
+    const list = favRecsByZone[zoneId] || [];
+    const key = recommendationKey(rec);
+    return list.some((r) => r.id === key);
   }
 
   // ---- Per-zone layer state
@@ -175,10 +216,18 @@ export default function AreasView({
   // ---- Selection helpers
   function selectZone(zoneId) {
     setSelectedZoneId((curr) => (curr === zoneId ? null : zoneId));
+    setShowAllZones(false);
     // Selecting a zone implicitly cancels edit/add modes if they target a
     // different zone — keeps things unambiguous.
     if (mode === MODE.EDIT && editZoneId !== zoneId) cancelEditMode();
     if (mode === MODE.ADD) cancelAddMode();
+  }
+  // "Show all my Zones" is now a pure deselect — it clears the focused zone
+  // so the user sees every zone's circle cleanly with no ribbons. Ribbons
+  // only ever appear when a single zone is selected.
+  function showAllZonesAction() {
+    setSelectedZoneId(null);
+    setShowAllZones(false);
   }
   function startEditMode(zoneId) {
     setEditZoneId(zoneId);
@@ -649,6 +698,36 @@ export default function AreasView({
 
         {reachedLimit ? <GoldUpsell limit={FREE_TIER_MAX_ZONES} /> : null}
 
+        {/* "Show all my Zones" — pure deselect. Clears the focused zone so
+            every zone's circle is visible on the map cleanly, with no
+            ribbons floating at the top. */}
+        {zones.length > 0 ? (
+          <div className="px-4 py-2.5 border-b border-slate-800">
+            <button
+              type="button"
+              onClick={showAllZonesAction}
+              disabled={!selectedZoneId}
+              className={`w-full text-[11.5px] font-semibold px-3 py-2 rounded border transition ${
+                selectedZoneId
+                  ? "border-cyan-500/40 bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-200"
+                  : "border-slate-800 bg-slate-900/60 text-slate-500 cursor-not-allowed"
+              }`}
+              title={
+                selectedZoneId
+                  ? "Deselect — view all your zones on the map without any ribbon focus."
+                  : "Already showing all zones cleanly. Click a zone below to surface its ribbons."
+              }
+            >
+              🗺️ Show all my Zones
+            </button>
+            <div className="text-[10px] text-slate-500 mt-1 leading-relaxed">
+              {selectedZoneId
+                ? `Currently focusing Zone ${zones.findIndex((z) => z.id === selectedZoneId) + 1}. Click "Show all my Zones" to deselect.`
+                : "No zone is focused — ribbons hidden. Click any zone below to surface its Property + Business ribbons."}
+            </div>
+          </div>
+        ) : null}
+
         <div className="px-4 py-3 border-b border-slate-800 flex items-center justify-between">
           <div className="text-[10px] uppercase tracking-wider text-slate-400 font-semibold">
             Working zones · {zones.length}
@@ -658,9 +737,9 @@ export default function AreasView({
               type="button"
               onClick={() => setSelectedZoneId(null)}
               className="text-[10px] text-cyan-300 hover:text-cyan-200 transition"
-              title="Clear zone selection (show all ribbons again)"
+              title="Clear zone selection (back to default)"
             >
-              ⛒ Clear selection
+              ⛒ Clear
             </button>
           ) : null}
         </div>
@@ -715,6 +794,9 @@ export default function AreasView({
           userBusinesses={userBusinesses}
           favourites={favourites}
           onToggleFavourite={toggleFavourite}
+          favRecsByZone={favRecsByZone}
+          onToggleFavRec={toggleFavRec}
+          isFavRec={isFavRec}
           onPick={handleMapPick}
           radarZones={radarZones}
         />
@@ -723,6 +805,7 @@ export default function AreasView({
           zones={zones}
           layers={layersForRender}
           selectedZoneId={selectedZoneId}
+          showAllZones={showAllZones}
           propertyMatchesByZone={propertyCounts}
           onToggleFilter={togglePropertyFilter}
           onAddProperty={startAddProperty}
@@ -823,6 +906,21 @@ export default function AreasView({
             setUserBusinesses(next);
             setPendingNewBusiness(null);
           }}
+        />
+      ) : null}
+
+      {/* Right-side Business Analysis panel — mirrors the main Business
+          section's layout: sidebar | map | analysis. Renders only when a
+          single zone is selected (so the user has clearly opted into one
+          zone's report); hidden in show-all overview mode. */}
+      {selectedZoneId ? (
+        <ZoneBusinessAnalysisPanel
+          zone={zones.find((z) => z.id === selectedZoneId)}
+          zoneIndex={zones.findIndex((z) => z.id === selectedZoneId)}
+          result={businessResults[selectedZoneId]}
+          loading={!!businessLoading[selectedZoneId]}
+          category={(layersForRender[selectedZoneId]?.businessCategory) || "mens_salon"}
+          onOpenFullReport={() => setReportZoneId(selectedZoneId)}
         />
       ) : null}
 

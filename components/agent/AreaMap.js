@@ -237,6 +237,11 @@ export default function AreaMap({
   userBusinesses = [],        // custom Add-Business pins
   favourites,                 // Set<propertyId>
   onToggleFavourite,
+  // Favorited business recommendations — per-zone. Each entry's `id` is the
+  // stable recommendation key (street + rounded coords).
+  favRecsByZone = {},
+  onToggleFavRec,
+  isFavRec,                   // (zoneId, rec) => bool
   onPick,
   radarZones = [],            // zones currently loading a business analysis
 }) {
@@ -365,7 +370,12 @@ export default function AreaMap({
 
       {/* ---- Per-zone Business overlays (gold/silver/bronze polylines + halos) */}
       {businessOverlays.map((bo) => (
-        <BusinessZoneOverlay key={`biz-${bo.zone.id}`} bo={bo} />
+        <BusinessZoneOverlay
+          key={`biz-${bo.zone.id}`}
+          bo={bo}
+          isFavRec={isFavRec}
+          onToggleFavRec={onToggleFavRec}
+        />
       ))}
 
       {/* ---- Custom user-added business pins ---- */}
@@ -429,7 +439,7 @@ export default function AreaMap({
 // Renders one zone's business analysis overlay. Popups for streets, businesses
 // and recommendations match the home Business section (components/MapView.js)
 // so the user gets the SAME windows in both places, per the spec.
-function BusinessZoneOverlay({ bo }) {
+function BusinessZoneOverlay({ bo, isFavRec, onToggleFavRec }) {
   const { zone, zoneIndex, ordered, all, competitors, recommendations, agencies } = bo;
   const zoneTag = `Zone ${zoneIndex + 1}`;
 
@@ -539,7 +549,13 @@ function BusinessZoneOverlay({ bo }) {
           zIndexOffset={800}
         >
           <Popup maxWidth={320}>
-            <RecommendationPopup rec={r} rank={i + 1} zoneTag={zoneTag} />
+            <RecommendationPopup
+              rec={r}
+              rank={i + 1}
+              zoneTag={zoneTag}
+              isFavorite={isFavRec?.(zone.id, r)}
+              onToggleFavorite={() => onToggleFavRec?.(zone.id, r)}
+            />
           </Popup>
         </Marker>
       ))}
@@ -553,35 +569,37 @@ function StreetDetailPopup({ street, zoneTag }) {
   const b = street.breakdown || {};
   const competitors = (street.businesses || []).filter((x) => x.isCompetitor);
   return (
-    <div className="rec-popup text-slate-900" style={{ maxWidth: 320 }}>
+    // Leaflet popup background is dark (#0b1220) via global CSS — use LIGHT
+    // text colours throughout to keep the popup readable.
+    <div className="rec-popup" style={{ maxWidth: 320 }}>
       {zoneTag ? (
-        <div style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: "0.06em", color: "#64748b", fontWeight: 600 }}>
+        <div style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: "0.06em", color: "#94a3b8", fontWeight: 600, marginBottom: 4 }}>
           {zoneTag}
         </div>
       ) : null}
       <span className={`tier-pill ${street.tier}`}>{street.tier}</span>
-      <div className="font-semibold text-sm text-slate-900 mt-1">{street.street}</div>
-      <div className="summary" style={{ color: "#475569" }}>
+      <div className="font-semibold text-sm text-slate-100 mt-1">{street.street}</div>
+      <div className="summary">
         Score {Math.round(street.score)}{street.highway ? ` · ${street.highway}` : ""}
       </div>
 
-      <div style={{ marginTop: 6, padding: 6, background: "#f1f5f9", borderRadius: 6 }}>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 4, fontSize: 10.5, color: "#64748b" }}>
-          <div>Competitors<br /><span style={{ color: "#0f172a", fontWeight: 600 }}>{b.competitors ?? 0}</span></div>
-          <div>Density<br /><span style={{ color: "#0f172a", fontWeight: 600 }}>{b.density ?? 0}</span></div>
-          <div>Variety<br /><span style={{ color: "#0f172a", fontWeight: 600 }}>{b.variety ?? 0}</span></div>
-          <div>Transit<br /><span style={{ color: "#0f172a", fontWeight: 600 }}>{b.transit ?? 0}</span></div>
-          <div>Anchors<br /><span style={{ color: "#0f172a", fontWeight: 600 }}>{b.anchors ?? 0}</span></div>
-          <div>Residential<br /><span style={{ color: "#0f172a", fontWeight: 600 }}>{b.residential ?? 0}</span></div>
+      <div style={{ marginTop: 6, padding: 6, background: "#0f172a", border: "1px solid #1f2937", borderRadius: 6 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 4, fontSize: 10.5, color: "#94a3b8" }}>
+          <div>Competitors<br /><span style={{ color: "#e5e7eb", fontWeight: 600 }}>{b.competitors ?? 0}</span></div>
+          <div>Density<br /><span style={{ color: "#e5e7eb", fontWeight: 600 }}>{b.density ?? 0}</span></div>
+          <div>Variety<br /><span style={{ color: "#e5e7eb", fontWeight: 600 }}>{b.variety ?? 0}</span></div>
+          <div>Transit<br /><span style={{ color: "#e5e7eb", fontWeight: 600 }}>{b.transit ?? 0}</span></div>
+          <div>Anchors<br /><span style={{ color: "#e5e7eb", fontWeight: 600 }}>{b.anchors ?? 0}</span></div>
+          <div>Residential<br /><span style={{ color: "#e5e7eb", fontWeight: 600 }}>{b.residential ?? 0}</span></div>
         </div>
       </div>
 
       {street.explanation ? (
-        <div className="reason" style={{ marginTop: 8, paddingTop: 6, borderTop: "1px solid #e2e8f0" }}>
-          <strong style={{ color: "#b45309", fontSize: 10, textTransform: "uppercase", letterSpacing: "0.05em" }}>
+        <div className="reason" style={{ marginTop: 8, paddingTop: 6, borderTop: "1px solid #1f2937" }}>
+          <strong style={{ color: "#fbbf24", fontSize: 10, textTransform: "uppercase", letterSpacing: "0.05em" }}>
             Why this street is {street.tier}
           </strong>
-          <div style={{ marginTop: 4, fontSize: 11.5, color: "#1e293b" }}>{street.explanation}</div>
+          <div style={{ marginTop: 4 }}>{street.explanation}</div>
           {street.explanationSource && street.explanationSource !== "template" ? (
             <div style={{ fontSize: 10, color: "#64748b", marginTop: 4 }}>
               analysis by {street.explanationSource}
@@ -591,11 +609,11 @@ function StreetDetailPopup({ street, zoneTag }) {
       ) : null}
 
       {competitors.length > 0 ? (
-        <div style={{ marginTop: 8, paddingTop: 6, borderTop: "1px solid #e2e8f0" }}>
-          <strong style={{ color: "#64748b", fontSize: 10, textTransform: "uppercase", letterSpacing: "0.05em" }}>
+        <div style={{ marginTop: 8, paddingTop: 6, borderTop: "1px solid #1f2937" }}>
+          <strong style={{ color: "#94a3b8", fontSize: 10, textTransform: "uppercase", letterSpacing: "0.05em" }}>
             Existing competitors here ({competitors.length})
           </strong>
-          <div style={{ fontSize: 11, color: "#334155", marginTop: 4, lineHeight: 1.5 }}>
+          <div style={{ fontSize: 11, color: "#cbd5e1", marginTop: 4, lineHeight: 1.5 }}>
             {competitors.slice(0, 8).map((c) => c.name).join(" · ")}
             {competitors.length > 8 ? ` · +${competitors.length - 8} more` : ""}
           </div>
@@ -615,15 +633,17 @@ function BusinessPopup({ b, zoneTag }) {
   const street = t["addr:street"] || b.street;
   const housenum = t["addr:housenumber"];
   const branches = b.branches || [];
+  // The .biz-popup global class already gives us light .row text on the dark
+  // popup background — don't override it with text-slate-900.
   return (
-    <div className="biz-popup text-slate-900" style={{ maxWidth: 280 }}>
+    <div className="biz-popup" style={{ maxWidth: 280 }}>
       {zoneTag ? (
-        <div style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: "0.06em", color: "#64748b", fontWeight: 600 }}>
+        <div style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: "0.06em", color: "#94a3b8", fontWeight: 600, marginBottom: 2 }}>
           {zoneTag}
         </div>
       ) : null}
-      <div className="font-semibold text-sm">{b.name}</div>
-      <div className="text-xs text-slate-500 mt-0.5">{b.category}</div>
+      <div className="font-semibold text-sm text-slate-100">{b.name}</div>
+      <div className="text-xs mt-0.5" style={{ color: "#94a3b8" }}>{b.category}</div>
 
       {street ? (
         <div className="row" style={{ fontSize: 11, marginTop: 4 }}>
@@ -640,17 +660,17 @@ function BusinessPopup({ b, zoneTag }) {
       {since ? (
         <div className="row" style={{ fontSize: 11, marginTop: 2 }}>📅 Operating since {since}</div>
       ) : (
-        <div className="row" style={{ fontSize: 11, marginTop: 2, color: "#94a3b8" }}>📅 Year established: not in OSM</div>
+        <div className="row" style={{ fontSize: 11, marginTop: 2, color: "#64748b" }}>📅 Year established: not in OSM</div>
       )}
       {brand ? <div className="row" style={{ fontSize: 11, marginTop: 2 }}>🏷️ Brand: {brand}</div> : null}
 
-      <div style={{ marginTop: 6, paddingTop: 4, borderTop: "1px solid #e2e8f0" }}>
+      <div style={{ marginTop: 6, paddingTop: 4, borderTop: "1px solid #1f2937" }}>
         {branches.length > 0 ? (
           <>
-            <div style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: "0.05em", color: "#64748b", fontWeight: 700 }}>
+            <div style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: "0.05em", color: "#94a3b8", fontWeight: 700 }}>
               {branches.length} other branch{branches.length === 1 ? "" : "es"} nearby
             </div>
-            <ul style={{ margin: "4px 0 0 0", padding: 0, listStyle: "none", fontSize: 11, color: "#334155" }}>
+            <ul style={{ margin: "4px 0 0 0", padding: 0, listStyle: "none", fontSize: 11, color: "#cbd5e1" }}>
               {branches.slice(0, 6).map((br) => (
                 <li key={br.id}>• {br.street}</li>
               ))}
@@ -658,7 +678,7 @@ function BusinessPopup({ b, zoneTag }) {
             </ul>
           </>
         ) : (
-          <div style={{ fontSize: 10.5, color: "#94a3b8", fontStyle: "italic" }}>
+          <div style={{ fontSize: 10.5, color: "#64748b", fontStyle: "italic" }}>
             No other branches detected in this radius
           </div>
         )}
@@ -670,17 +690,17 @@ function BusinessPopup({ b, zoneTag }) {
 function ShopOpportunityPopup({ rec, agencies, zoneTag }) {
   const list = agencies?.agencies || [];
   return (
-    <div className="text-slate-900" style={{ maxWidth: 260 }}>
+    <div style={{ maxWidth: 260 }}>
       <div style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: "0.06em", color: "#10b981", fontWeight: 700 }}>
         {zoneTag ? `${zoneTag} · ` : ""}Shop opportunity area
       </div>
-      <div style={{ fontWeight: 600, color: "#0f172a", fontSize: 13, marginTop: 2 }}>{rec.street}</div>
-      <div style={{ fontSize: 11, color: "#475569", marginTop: 2 }}>
+      <div style={{ fontWeight: 600, color: "#f1f5f9", fontSize: 13, marginTop: 2 }}>{rec.street}</div>
+      <div style={{ fontSize: 11, color: "#94a3b8", marginTop: 2 }}>
         {rec.tier?.toUpperCase()} · score {rec.score}{rec.highway ? ` · ${rec.highway}` : ""}
       </div>
-      <div style={{ fontSize: 11.5, color: "#334155", marginTop: 8, lineHeight: 1.5 }}>
+      <div style={{ fontSize: 11.5, color: "#cbd5e1", marginTop: 8, lineHeight: 1.5 }}>
         We don't host live shop listings — that requires a paid real-estate API. Use these
-        portals to see shops <strong>currently for rent or sale</strong> in this area:
+        portals to see shops <strong style={{ color: "#fbbf24" }}>currently for rent or sale</strong> in this area:
       </div>
       {list.length > 0 ? (
         <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 8 }}>
@@ -698,13 +718,13 @@ function ShopOpportunityPopup({ rec, agencies, zoneTag }) {
                 borderRadius: 6,
                 background: "rgba(6, 182, 212, 0.12)",
                 border: "1px solid rgba(6, 182, 212, 0.4)",
-                color: "#0e7490",
+                color: "#a5f3fc",
                 fontSize: 11.5,
                 textDecoration: "none",
               }}
             >
               <span style={{ fontWeight: 600 }}>{a.name}</span>
-              <span style={{ fontSize: 10, color: "#475569", textTransform: "uppercase" }}>{a.listingType} →</span>
+              <span style={{ fontSize: 10, color: "#94a3b8", textTransform: "uppercase" }}>{a.listingType} →</span>
             </a>
           ))}
         </div>
@@ -717,22 +737,44 @@ function ShopOpportunityPopup({ rec, agencies, zoneTag }) {
   );
 }
 
-function RecommendationPopup({ rec, rank, zoneTag }) {
+function RecommendationPopup({ rec, rank, zoneTag, isFavorite, onToggleFavorite }) {
   return (
-    <div className="rec-popup text-slate-900" style={{ maxWidth: 300 }}>
-      <span className="badge">{zoneTag ? `${zoneTag} · ` : ""}★ Recommended #{rank}</span>
-      <div className="font-semibold text-sm text-slate-900 mt-1">{rec.street}</div>
-      <div className="summary" style={{ color: "#475569" }}>
+    <div className="rec-popup" style={{ maxWidth: 300 }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+        <span className="badge">{zoneTag ? `${zoneTag} · ` : ""}★ Recommended #{rank}</span>
+        {/* Favourite toggle — persists to localStorage per zone, surfaces on
+            the dashboard zone card so the agent can revisit later. */}
+        <button
+          type="button"
+          onClick={(e) => { e.preventDefault(); onToggleFavorite?.(); }}
+          title={isFavorite ? "Remove from saved recommendations" : "Save this recommendation to this zone"}
+          style={{
+            background: isFavorite ? "rgba(251, 191, 36, 0.25)" : "transparent",
+            border: isFavorite ? "1px solid #fbbf24" : "1px solid #475569",
+            color: isFavorite ? "#fde68a" : "#cbd5e1",
+            borderRadius: 6,
+            padding: "2px 8px",
+            cursor: "pointer",
+            fontSize: 13,
+            lineHeight: 1,
+            fontWeight: 700,
+          }}
+        >
+          {isFavorite ? "★" : "☆"}
+        </button>
+      </div>
+      <div className="font-semibold text-sm text-slate-100 mt-1">{rec.street}</div>
+      <div className="summary">
         {rec.tier?.toUpperCase()} · score {rec.score}{rec.highway ? ` · ${rec.highway}` : ""}
       </div>
-      <div className="summary" style={{ color: "#334155", marginTop: 4 }}>{rec.summary}</div>
+      <div className="summary">{rec.summary}</div>
 
       {rec.nearbyAnchors && rec.nearbyAnchors.length > 0 ? (
-        <div className="summary" style={{ paddingTop: 6, marginTop: 6, borderTop: "1px solid #e2e8f0", color: "#334155" }}>
-          <strong style={{ color: "#64748b" }}>Footfall drivers nearby:</strong>
+        <div className="summary" style={{ paddingTop: 6, marginTop: 6, borderTop: "1px solid #1f2937" }}>
+          <strong style={{ color: "#94a3b8" }}>Footfall drivers nearby:</strong>
           <ul style={{ margin: "4px 0 0 0", padding: 0, listStyle: "none" }}>
             {rec.nearbyAnchors.slice(0, 4).map((a, j) => (
-              <li key={j} style={{ fontSize: 11 }}>
+              <li key={j} style={{ fontSize: 11, color: "#cbd5e1" }}>
                 • {a.label} (~{a.distance} m)
               </li>
             ))}
@@ -741,11 +783,11 @@ function RecommendationPopup({ rec, rank, zoneTag }) {
       ) : null}
 
       {rec.reason ? (
-        <div className="reason" style={{ marginTop: 6, paddingTop: 6, borderTop: "1px solid #e2e8f0" }}>
-          <strong style={{ color: "#b45309", fontSize: 10, textTransform: "uppercase", letterSpacing: "0.05em" }}>
+        <div className="reason" style={{ marginTop: 6, paddingTop: 6, borderTop: "1px solid #1f2937" }}>
+          <strong style={{ color: "#fbbf24", fontSize: 10, textTransform: "uppercase", letterSpacing: "0.05em" }}>
             Why this spot
           </strong>
-          <div style={{ marginTop: 4, fontSize: 11.5, color: "#1e293b" }}>{rec.reason}</div>
+          <div style={{ marginTop: 4 }}>{rec.reason}</div>
           {rec.reasonSource && rec.reasonSource !== "template" ? (
             <div style={{ fontSize: 10, color: "#64748b", marginTop: 4 }}>
               analysis by {rec.reasonSource}
@@ -757,10 +799,11 @@ function RecommendationPopup({ rec, rank, zoneTag }) {
   );
 }
 
-// Property popup with a favourite (☆/★) toggle button.
+// Property popup with a favourite (☆/★) toggle button. Lives on the dark
+// Leaflet popup background, so every colour is in the light-text family.
 function PropertyPopup({ p, filter, isFavourite, onToggleFavourite }) {
   return (
-    <div className="text-slate-900" style={{ minWidth: 230 }}>
+    <div style={{ minWidth: 230 }}>
       <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 8 }}>
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
@@ -768,12 +811,14 @@ function PropertyPopup({ p, filter, isFavourite, onToggleFavourite }) {
               <span style={{
                 fontSize: 10, textTransform: "uppercase", letterSpacing: "0.05em",
                 fontWeight: 700, color: filter.color,
-                padding: "2px 6px", borderRadius: 4, background: `${filter.color}18`,
+                padding: "2px 6px", borderRadius: 4,
+                background: `${filter.color}22`,
+                border: `1px solid ${filter.color}55`,
               }}>{filter.icon} {filter.label}</span>
             ) : null}
           </div>
-          <div style={{ fontWeight: 700, fontSize: 13, marginTop: 4 }}>{p.title}</div>
-          <div style={{ fontSize: 11, color: "#475569", marginTop: 2 }}>
+          <div style={{ fontWeight: 700, fontSize: 13, marginTop: 4, color: "#f1f5f9" }}>{p.title}</div>
+          <div style={{ fontSize: 11, color: "#94a3b8", marginTop: 2 }}>
             {p.building}{p.area ? `, ${p.area}` : ""}
           </div>
         </div>
@@ -783,9 +828,9 @@ function PropertyPopup({ p, filter, isFavourite, onToggleFavourite }) {
           onClick={(e) => { e.preventDefault(); onToggleFavourite?.(p.id); }}
           title={isFavourite ? "Remove from favourites" : "Save to favourites"}
           style={{
-            background: isFavourite ? "#fde68a" : "transparent",
-            border: isFavourite ? "1px solid #f59e0b" : "1px solid #cbd5e1",
-            color: isFavourite ? "#b45309" : "#64748b",
+            background: isFavourite ? "rgba(251, 191, 36, 0.25)" : "transparent",
+            border: isFavourite ? "1px solid #fbbf24" : "1px solid #475569",
+            color: isFavourite ? "#fde68a" : "#cbd5e1",
             borderRadius: 6,
             padding: "4px 8px",
             cursor: "pointer",
@@ -798,16 +843,16 @@ function PropertyPopup({ p, filter, isFavourite, onToggleFavourite }) {
         </button>
       </div>
 
-      <div style={{ fontWeight: 700, color: "#b45309", marginTop: 6, fontSize: 13 }}>
+      <div style={{ fontWeight: 700, color: "#fbbf24", marginTop: 6, fontSize: 13 }}>
         {p.listing === "rent"
           ? `AED ${Number(p.price).toLocaleString()}/year`
           : `AED ${Number(p.price).toLocaleString()}`}
       </div>
-      <div style={{ fontSize: 11, marginTop: 4, color: "#475569" }}>
+      <div style={{ fontSize: 11, marginTop: 4, color: "#cbd5e1" }}>
         {p.beds ? `${p.beds} BR` : "Studio"} · {p.baths} bath · {Number(p.area_sqft || 0).toLocaleString()} ft²
       </div>
       {p.features && p.features.length > 0 ? (
-        <div style={{ fontSize: 10.5, color: "#475569", marginTop: 4, lineHeight: 1.4 }}>
+        <div style={{ fontSize: 10.5, color: "#94a3b8", marginTop: 4, lineHeight: 1.4 }}>
           {p.features.slice(0, 6).join(" · ")}
         </div>
       ) : null}

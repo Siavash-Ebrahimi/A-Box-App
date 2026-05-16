@@ -13,9 +13,15 @@ import { ZONE_PALETTE } from "./ZoneLayerDrawer";
 export default function ZoneRibbonsStack({
   zones = [],
   layers = {},
-  // When set, ONLY this zone's ribbons render. Other zones' ribbons hide
-  // so the map isn't cluttered while the user is focused on one area.
+  // Ribbon visibility rule (simplified): ribbons render ONLY when a single
+  // zone is selected. The "Show all my Zones" button in the sidebar is a pure
+  // deselect — it clears the focus and the map shows every zone's circle
+  // cleanly with no ribbons floating across the top.
   selectedZoneId = null,
+  // showAllZones is kept in the signature for backwards-compat with the
+  // parent but is ignored for ribbon visibility — see comment above.
+  // eslint-disable-next-line no-unused-vars
+  showAllZones = false,
   // Property side
   propertyMatchesByZone = {},      // { [zoneId]: number of matches inside that zone }
   onToggleFilter,                  // (zoneId, filterValue) → void
@@ -33,12 +39,11 @@ export default function ZoneRibbonsStack({
   const propertyRibbons = [];
   const businessRibbons = [];
 
-  // Filter zones to render based on selection. If nothing is selected, show
-  // every zone's ribbons (the "overview" mode). If a zone is selected, only
-  // that zone's ribbons appear — per the user's single-zone-focus spec.
+  // Decide which zones contribute ribbons this render. Default = none, until
+  // the agent selects a single zone.
   const visibleZones = selectedZoneId
     ? zones.filter((z) => z.id === selectedZoneId)
-    : zones;
+    : [];
 
   visibleZones.forEach((z) => {
     // Use the zone's original index for colour + label parity with the rest

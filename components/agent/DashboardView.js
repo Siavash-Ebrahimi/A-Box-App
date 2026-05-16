@@ -10,7 +10,11 @@ import { ICASE_TEMPLATES } from "@/lib/agent/iCases";
 import {
   loadZoneLayers,
   loadZoneBusinessSummaries,
+  loadFavourites,
+  loadFavoriteRecommendations,
 } from "@/lib/agent/storage";
+import { loadUserProperties } from "@/lib/property/userProperties";
+import { metersBetween } from "@/lib/agent/distance";
 import { PROPERTY_FILTER_BY_VALUE } from "@/lib/property/filters";
 import { BUSINESS_CATEGORIES } from "./BusinessRibbon";
 
@@ -45,13 +49,30 @@ export default function DashboardView({
 
   // Pull the per-zone layer state + business-analysis summaries so each snap
   // card can show what the agent has actually configured (active property
-  // filters + which business categories they've analysed).
+  // filters + which business categories they've analysed). Also load
+  // property favourites + favourited recommendations so saved items show up
+  // beside each zone — these feed the i-Cases section too.
   const [zoneLayers, setZoneLayers] = useState({});
   const [bizSummaries, setBizSummaries] = useState({});
+  const [favIds, setFavIds] = useState(() => new Set());
+  const [favRecsByZone, setFavRecsByZone] = useState({});
+  const [userProps, setUserProps] = useState([]);
   useEffect(() => {
     setZoneLayers(loadZoneLayers());
     setBizSummaries(loadZoneBusinessSummaries());
+    setFavIds(loadFavourites());
+    setFavRecsByZone(loadFavoriteRecommendations());
+    setUserProps(loadUserProperties());
   }, [zones.length]);
+
+  // Resolve favourite property IDs to full property records once (uses the
+  // built-in catalogue + user-added properties). Cards filter this list by
+  // zone radius locally.
+  const favouriteProperties = useMemo(() => {
+    if (!favIds || favIds.size === 0) return [];
+    const all = [...PROPERTIES, ...userProps];
+    return all.filter((p) => favIds.has(p.id));
+  }, [favIds, userProps]);
 
   const reachedCaseLimit = iCases.length >= FREE_TIER_MAX_ICASES;
   const reachedZoneLimit = zones.length >= FREE_TIER_MAX_ZONES;
@@ -76,8 +97,14 @@ export default function DashboardView({
         <FirstTimeGuide onGoAreas={() => onGo("areas")} />
       ) : null}
 
-      {/* YOUR WORKING ZONES */}
-      <section className="mb-9">
+      {/* Side-by-side layout: Working Zones (left) | i-Cases (right). Stacks
+          to a single column below the xl breakpoint so the dashboard stays
+          usable on narrower viewports. A divider line sits in the gutter
+          between the two columns (vertical on xl, horizontal when stacked). */}
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-6 mb-9 relative xl:divide-x divide-slate-800">
+
+      {/* YOUR WORKING ZONES — left column */}
+      <section className="xl:pr-6">
         <div className="flex items-center justify-between mb-3">
           <h2 className="text-[11px] uppercase tracking-[0.18em] text-slate-300 font-semibold">
             Your Working Zones · {zones.length}
@@ -86,9 +113,9 @@ export default function DashboardView({
             <button
               type="button"
               onClick={() => onGo("areas")}
-              className="text-[11px] px-3 py-1.5 rounded border border-cyan-500/40 bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-200 font-semibold transition"
+              className="text-[10px] px-2.5 py-1 rounded border border-cyan-500/40 bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-200 font-semibold transition"
             >
-              🗺️ Show all areas together
+              🗺️ Show all areas
             </button>
           ) : null}
         </div>
@@ -96,7 +123,7 @@ export default function DashboardView({
         {zones.length === 0 ? (
           <EmptyZones onGo={() => onGo("areas")} />
         ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             {zones.map((z, i) => (
               <ZoneSnapCard
                 key={z.id}
@@ -105,62 +132,60 @@ export default function DashboardView({
                 color={ZONE_PALETTE[i % ZONE_PALETTE.length]}
                 layer={zoneLayers[z.id]}
                 bizSummary={bizSummaries[z.id]}
+                favouriteProperties={favouriteProperties}
+                favouriteRecs={favRecsByZone[z.id] || []}
                 onOpenMap={() => onFocusZone?.(z.id)}
                 onOpenSettings={() => setSettingsZone(z)}
                 relatedICases={iCases.filter((c) => c.zoneIds?.includes(z.id))}
               />
             ))}
 
-            {/* Big + add-zone card — mirrors the i-Cases "Add new" pattern below.
-                Clicking jumps to the Working Areas view where the agent drops a
-                pin and configures radius + activities. Disabled at the free-plan
-                quota (kept consistent with how AreasView caps creation). */}
+            {/* Big + add-zone card */}
             <button
               type="button"
               onClick={() => !reachedZoneLimit && onGo("areas")}
               disabled={reachedZoneLimit}
-              className={`rounded-lg border-2 border-dashed flex flex-col items-center justify-center min-h-[260px] p-5 transition ${
+              className={`rounded-lg border-2 border-dashed flex flex-col items-center justify-center min-h-[180px] p-3 transition ${
                 reachedZoneLimit
                   ? "border-slate-800 bg-slate-900/30 cursor-not-allowed"
                   : "border-slate-700 bg-slate-900/30 hover:border-cyan-500 hover:bg-cyan-500/5"
               }`}
               title={reachedZoneLimit ? "Free-plan limit reached — upgrade to Gold" : "Drop a new working zone"}
             >
-              <div className={`text-5xl ${reachedZoneLimit ? "text-slate-700" : "text-cyan-300"}`}>+</div>
-              <div className={`mt-2 text-sm font-semibold ${reachedZoneLimit ? "text-slate-500" : "text-slate-100"}`}>
+              <div className={`text-4xl ${reachedZoneLimit ? "text-slate-700" : "text-cyan-300"}`}>+</div>
+              <div className={`mt-1.5 text-[12.5px] font-semibold ${reachedZoneLimit ? "text-slate-500" : "text-slate-100"}`}>
                 {reachedZoneLimit ? "Free-plan limit reached" : "Add new zone"}
               </div>
-              <div className={`text-[11px] mt-1 max-w-[28ch] text-center leading-relaxed ${
+              <div className={`text-[10px] mt-1 max-w-[26ch] text-center leading-relaxed ${
                 reachedZoneLimit ? "text-slate-600" : "text-slate-400"
               }`}>
                 {reachedZoneLimit
-                  ? `You're using ${FREE_TIER_MAX_ZONES} of ${FREE_TIER_MAX_ZONES} zones. Upgrade to Gold for unlimited.`
-                  : "Pick a spot on the map, set a radius, and tag the activities you cover there."}
+                  ? `${FREE_TIER_MAX_ZONES}/${FREE_TIER_MAX_ZONES} used. Upgrade to Gold.`
+                  : "Pick a spot on the map, set a radius."}
               </div>
             </button>
           </div>
         )}
       </section>
 
-      {/* MY i-CASES / ASSISTANCES */}
-      <section className="mb-9">
+      {/* MY i-CASES / ASSISTANCES — right column */}
+      <section className="xl:pl-6 pt-6 xl:pt-0 border-t xl:border-t-0 border-slate-800">
         <div className="flex items-center justify-between mb-3">
           <div>
             <h2 className="text-[11px] uppercase tracking-[0.18em] text-slate-300 font-semibold">
-              My i-Cases / Assistances · {iCases.length}
-              <span className="ml-2 text-slate-500 normal-case tracking-normal">
+              My i-Cases · {iCases.length}
+              <span className="ml-2 text-slate-500 normal-case tracking-normal text-[10px]">
                 Free plan: up to {FREE_TIER_MAX_ICASES}
               </span>
             </h2>
-            <p className="text-[11.5px] text-slate-500 mt-1 max-w-xl leading-relaxed">
-              Each i-Case is an automation recipe — a trigger, a few steps, and the agents and
-              customers it watches. Spin one up per repeating task to handle multiple
-              workflows in parallel.
+            <p className="text-[10.5px] text-slate-500 mt-1 max-w-md leading-relaxed">
+              Each i-Case is an automation recipe — a trigger, a few steps, and
+              the agents + customers it watches.
             </p>
           </div>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           {iCases.map((c) => (
             <ICaseCard
               key={c.id}
@@ -187,26 +212,28 @@ export default function DashboardView({
             type="button"
             onClick={() => !reachedCaseLimit && setBuilderState({ editing: null })}
             disabled={reachedCaseLimit}
-            className={`rounded-lg border-2 border-dashed flex flex-col items-center justify-center min-h-[220px] p-5 transition ${
+            className={`rounded-lg border-2 border-dashed flex flex-col items-center justify-center min-h-[180px] p-3 transition ${
               reachedCaseLimit
                 ? "border-slate-800 bg-slate-900/30 cursor-not-allowed"
                 : "border-slate-700 bg-slate-900/30 hover:border-amber-500 hover:bg-amber-500/5"
             }`}
           >
-            <div className={`text-5xl ${reachedCaseLimit ? "text-slate-700" : "text-amber-300"}`}>+</div>
-            <div className={`mt-2 text-sm font-semibold ${reachedCaseLimit ? "text-slate-500" : "text-slate-100"}`}>
+            <div className={`text-4xl ${reachedCaseLimit ? "text-slate-700" : "text-amber-300"}`}>+</div>
+            <div className={`mt-1.5 text-[12.5px] font-semibold ${reachedCaseLimit ? "text-slate-500" : "text-slate-100"}`}>
               {reachedCaseLimit ? "Free-plan limit reached" : "Add new i-Case"}
             </div>
-            <div className={`text-[11px] mt-1 max-w-[28ch] text-center leading-relaxed ${
+            <div className={`text-[10px] mt-1 max-w-[26ch] text-center leading-relaxed ${
               reachedCaseLimit ? "text-slate-600" : "text-slate-400"
             }`}>
               {reachedCaseLimit
-                ? `You're using ${FREE_TIER_MAX_ICASES} of ${FREE_TIER_MAX_ICASES}. Upgrade to Gold for unlimited.`
-                : "Pick a template, name it, assign zones + agents."}
+                ? `${FREE_TIER_MAX_ICASES}/${FREE_TIER_MAX_ICASES} used. Upgrade to Gold.`
+                : "Name it, assign zones + agents."}
             </div>
           </button>
         </div>
       </section>
+
+      </div>
 
       <div className="text-[10px] text-slate-600 leading-relaxed">
         A-Box Agent Hub MVP · Mock property data · AI customers powered by OpenRouter ·
@@ -239,7 +266,11 @@ export default function DashboardView({
 
 // ----- Working-zone snap card ------------------------------------------------
 
-function ZoneSnapCard({ zone, index, color, layer, bizSummary, onOpenMap, onOpenSettings, relatedICases }) {
+function ZoneSnapCard({
+  zone, index, color, layer, bizSummary,
+  favouriteProperties = [], favouriteRecs = [],
+  onOpenMap, onOpenSettings, relatedICases,
+}) {
   const matched = useMemo(() => filterPropertiesByZones(PROPERTIES, [zone]), [zone]);
   const counts = useMemo(() => groupByActivity(matched, zone), [matched, zone]);
   const total = matched.length;
@@ -255,34 +286,45 @@ function ZoneSnapCard({ zone, index, color, layer, bizSummary, onOpenMap, onOpen
   const bizCategory = bizSummary?.category;
   const bizCatLabel = BUSINESS_CATEGORIES.find((c) => c.value === bizCategory)?.label || bizCategory;
 
+  // Favourited properties that physically sit inside this zone's circle.
+  // We compute it here (rather than passing in pre-filtered) so each card
+  // only re-derives its own slice.
+  const savedPropsInZone = useMemo(() => {
+    if (favouriteProperties.length === 0) return [];
+    return favouriteProperties.filter(
+      (p) => typeof p.lat === "number" && typeof p.lng === "number"
+        && metersBetween(p.lat, p.lng, zone.lat, zone.lng) <= zone.radius,
+    );
+  }, [favouriteProperties, zone.lat, zone.lng, zone.radius]);
+
   return (
     <div className="text-left rounded-lg overflow-hidden border border-slate-700 bg-slate-900/40 hover:border-slate-500 hover:shadow-lg hover:shadow-cyan-500/10 transition group">
       {/* Mini map snapshot — click to fly to it in the working-areas view */}
-      <button type="button" onClick={onOpenMap} className="block relative h-32 w-full bg-slate-800 cursor-pointer">
+      <button type="button" onClick={onOpenMap} className="block relative h-24 w-full bg-slate-800 cursor-pointer">
         <ZoneSnapMap zone={zone} color={color} />
-        <div className="absolute top-2 left-2 flex items-center gap-1.5 z-10">
+        <div className="absolute top-1.5 left-1.5 flex items-center gap-1 z-10">
           <span
-            className="inline-block w-2.5 h-2.5 rounded-full"
-            style={{ background: color, boxShadow: `0 0 8px ${color}` }}
+            className="inline-block w-2 h-2 rounded-full"
+            style={{ background: color, boxShadow: `0 0 6px ${color}` }}
           />
-          <span className="text-[10px] uppercase tracking-wider font-bold text-slate-100 px-1.5 py-0.5 rounded bg-slate-900/80 backdrop-blur">
+          <span className="text-[9.5px] uppercase tracking-wider font-bold text-slate-100 px-1 py-0.5 rounded bg-slate-900/80 backdrop-blur">
             Zone {index + 1}
           </span>
         </div>
-        <div className="absolute top-2 right-2 z-10">
-          <span className="text-[10px] uppercase tracking-wider font-semibold text-slate-100 px-1.5 py-0.5 rounded bg-slate-900/80 backdrop-blur tabular-nums">
+        <div className="absolute top-1.5 right-1.5 z-10">
+          <span className="text-[9.5px] uppercase tracking-wider font-semibold text-slate-100 px-1 py-0.5 rounded bg-slate-900/80 backdrop-blur tabular-nums">
             {(zone.radius / 1000).toFixed(1)} km
           </span>
         </div>
-        <div className="absolute inset-x-0 bottom-0 h-10 bg-gradient-to-t from-slate-900 to-transparent" />
+        <div className="absolute inset-x-0 bottom-0 h-8 bg-gradient-to-t from-slate-900 to-transparent" />
       </button>
 
       {/* Body */}
-      <div className="p-3">
+      <div className="p-2.5">
         <div className="flex items-start gap-2">
           <div className="flex-1 min-w-0">
-            <div className="font-semibold text-sm text-slate-100 truncate">{zone.label}</div>
-            <div className="text-[10.5px] text-slate-400 truncate">
+            <div className="font-semibold text-[12.5px] text-slate-100 truncate">{zone.label}</div>
+            <div className="text-[10px] text-slate-400 truncate">
               {zone.addressLabel || "Resolving address…"}
             </div>
           </div>
@@ -395,6 +437,63 @@ function ZoneSnapCard({ zone, index, color, layer, bizSummary, onOpenMap, onOpen
           </div>
         ) : null}
 
+        {/* Saved property pins inside this zone — fed straight into i-Cases
+            via the `selectedPropertyIds` field on each case. */}
+        {savedPropsInZone.length > 0 ? (
+          <div className="mt-2 pt-2 border-t border-slate-800">
+            <div className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold mb-1.5">
+              ★ Saved properties · {savedPropsInZone.length}
+            </div>
+            <div className="space-y-1">
+              {savedPropsInZone.slice(0, 3).map((p) => (
+                <div key={p.id} className="flex items-center gap-1.5 text-[10.5px]">
+                  <span className="text-amber-300 shrink-0">★</span>
+                  <span className="text-slate-200 truncate flex-1">{p.title}</span>
+                  <span className="text-amber-300 font-semibold tabular-nums shrink-0">
+                    {formatPrice(p)}
+                  </span>
+                </div>
+              ))}
+              {savedPropsInZone.length > 3 ? (
+                <div className="text-[9.5px] text-slate-500 ml-3">
+                  + {savedPropsInZone.length - 3} more saved
+                </div>
+              ) : null}
+            </div>
+            <div className="text-[9px] text-slate-600 mt-1 italic">
+              Available to reference in i-Cases
+            </div>
+          </div>
+        ) : null}
+
+        {/* Saved business-analysis recommendation stars (★ from the map). */}
+        {favouriteRecs.length > 0 ? (
+          <div className="mt-2 pt-2 border-t border-slate-800">
+            <div className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold mb-1.5">
+              ★ Saved recommendations · {favouriteRecs.length}
+            </div>
+            <div className="space-y-1">
+              {favouriteRecs.slice(0, 3).map((r) => (
+                <div key={r.id} className="flex items-center gap-1.5 text-[10.5px]">
+                  <span className="text-cyan-300 shrink-0">★</span>
+                  <span className="text-slate-200 truncate flex-1">{r.street}</span>
+                  <span className="text-cyan-300 font-semibold tabular-nums shrink-0">
+                    {r.tier?.[0]?.toUpperCase()}·{Math.round(r.score)}
+                  </span>
+                </div>
+              ))}
+              {favouriteRecs.length > 3 ? (
+                <div className="text-[9.5px] text-slate-500 ml-3">
+                  + {favouriteRecs.length - 3} more saved
+                </div>
+              ) : null}
+            </div>
+            <div className="text-[9px] text-slate-600 mt-1 italic">
+              Available to reference in i-Cases
+            </div>
+          </div>
+        ) : null}
+
         {/* Assignments + linked i-Cases */}
         <Assignments
           agentKeys={zone.assignedAgents}
@@ -486,29 +585,29 @@ function ICaseCard({ iCase, zones, onEdit, onRemove, onTogglePause, onApproveAll
     >
       {/* Header bar with the case's graphic + status */}
       <div
-        className="px-3 py-2.5 flex items-center gap-2.5"
+        className="px-2.5 py-2 flex items-center gap-2"
         style={{ background: `${t?.color || "#64748b"}15` }}
       >
         <div
-          className="w-9 h-9 rounded-lg flex items-center justify-center text-lg shrink-0"
+          className="w-7 h-7 rounded-lg flex items-center justify-center text-base shrink-0"
           style={{ background: `${t?.color || "#64748b"}30`, color: t?.color || "#cbd5e1" }}
         >
           {t?.icon || "🤖"}
         </div>
         <div className="flex-1 min-w-0">
-          <div className="text-[12.5px] font-semibold text-slate-100 truncate">{iCase.name}</div>
-          <div className="text-[10px] uppercase tracking-wider text-slate-500">
+          <div className="text-[12px] font-semibold text-slate-100 truncate">{iCase.name}</div>
+          <div className="text-[9.5px] uppercase tracking-wider text-slate-500">
             {t?.category || "Custom"} · {iCase.status === "paused" ? "paused" : "active"}
           </div>
         </div>
         <span
-          className={`w-2 h-2 rounded-full ${
+          className={`w-1.5 h-1.5 rounded-full ${
             iCase.status === "paused" ? "bg-slate-500" : "bg-emerald-400 animate-pulse"
           }`}
         />
       </div>
 
-      <div className="p-3 space-y-2.5">
+      <div className="p-2.5 space-y-2">
         {/* Description: either the workspace-author's description, or the legacy
             template's blurb. Trigger/steps only render for legacy template-based
             i-Cases — workspace-built i-Cases show their actual rule count instead. */}
@@ -576,7 +675,7 @@ function ICaseCard({ iCase, zones, onEdit, onRemove, onTogglePause, onApproveAll
               </button>
             ) : null}
           </div>
-          <div className="max-h-24 overflow-y-auto scrollbar-thin px-2.5 py-1.5 space-y-1">
+          <div className="max-h-20 overflow-y-auto scrollbar-thin px-2.5 py-1.5 space-y-1">
             {(iCase.notifications || []).length === 0 ? (
               <div className="text-[10.5px] text-slate-500 italic">No events yet</div>
             ) : (
