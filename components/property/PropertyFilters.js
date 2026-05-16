@@ -17,17 +17,27 @@ export default function PropertyFilters({
   mode,                       // "explore" | "compare"
   area1, radius1, filters1,
   area2, radius2, filters2,
-  comparePick1, comparePick2, // {id, title, area, ...} | null
-  resultCount,                // total visible properties across both areas
-  resultCountByArea,          // { 1: n, 2: n } in compare mode
+  comparePick1, comparePick2,
+  resultCount,                // pins currently shown on the map
+  resultCountByArea,          // { 1: n, 2: n } — pool size per area (in radius + filters)
+  // NEW: checklist data
+  propsInArea1 = [],
+  propsInArea2 = [],
+  selectedIds1,               // Set<string>
+  selectedIds2,               // Set<string>
+  onToggleProperty,           // (slot, propertyId) => void
   // Handlers
-  onChangeArea,               // (idx) => void  — agent wants to re-pick area idx
-  onChangeFilters,            // (idx, nextSet) => void
-  onChangeRadius,             // (idx, meters) => void
-  onToggleCompare,            // () => void  — flips mode
-  onClearComparePick,         // (idx) => void
-  onOpenComparison,           // () => void  — opens the AI report modal
-  onBackToHome,               // () => void
+  onChangeArea,
+  onChangeFilters,
+  onChangeRadius,
+  onToggleCompare,
+  onClearComparePick,
+  onOpenComparison,
+  onBackToHome,
+  // Add Property flow
+  placeMode,
+  onStartAddProperty,
+  onCancelAddProperty,
 }) {
   const showCompareTray = mode === "compare";
   const canRunReport = !!comparePick1 && !!comparePick2;
@@ -50,8 +60,8 @@ export default function PropertyFilters({
         </div>
       </header>
 
-      {/* Compare toggle */}
-      <div className="px-4 py-3 border-b border-slate-800">
+      {/* Compare toggle + Add Property */}
+      <div className="px-4 py-3 border-b border-slate-800 space-y-2">
         <button
           type="button"
           onClick={onToggleCompare}
@@ -63,10 +73,25 @@ export default function PropertyFilters({
         >
           {showCompareTray ? "✓ Compare Two Areas (on)" : "Compare Two Areas"}
         </button>
-        <div className="text-[10.5px] text-slate-500 mt-1.5 leading-relaxed">
-          {showCompareTray
-            ? "Click the map to set Area 2. Pick one property in each area to enable the AI report."
-            : "Turn this on to evaluate two locations side-by-side with an AI report."}
+
+        {/* Add Property — turns on place-mode; next map click drops the location. */}
+        <button
+          type="button"
+          onClick={placeMode ? onCancelAddProperty : onStartAddProperty}
+          className={`w-full text-[12px] font-semibold px-3 py-2 rounded border transition ${
+            placeMode
+              ? "border-amber-500 bg-amber-500/20 text-amber-100"
+              : "border-amber-500/40 bg-amber-500/5 text-amber-200 hover:bg-amber-500/15"
+          }`}
+        >
+          {placeMode ? "⏳ Click the map to drop pin · Cancel" : "+ Add Property"}
+        </button>
+        <div className="text-[10.5px] text-slate-500 leading-relaxed">
+          {placeMode
+            ? "Zoom in close before clicking so the pin lands on the exact building."
+            : showCompareTray
+              ? "Click the map to set Area 2. Pick one property in each area to enable the AI report."
+              : "Turn Compare on for a side-by-side report, or add a property to save your own listing."}
         </div>
       </div>
 
@@ -84,6 +109,9 @@ export default function PropertyFilters({
           onChangeArea={() => onChangeArea(1)}
           onChangeFilters={(next) => onChangeFilters(1, next)}
           onChangeRadius={(r) => onChangeRadius(1, r)}
+          propsInArea={propsInArea1}
+          selectedIds={selectedIds1}
+          onToggleProperty={(id) => onToggleProperty?.(1, id)}
         />
 
         {/* Area 2 controls (compare only) */}
@@ -101,6 +129,9 @@ export default function PropertyFilters({
             onChangeFilters={(next) => onChangeFilters(2, next)}
             onChangeRadius={(r) => onChangeRadius(2, r)}
             placeholderHint="Click the map to set Area 2"
+            propsInArea={propsInArea2}
+            selectedIds={selectedIds2}
+            onToggleProperty={(id) => onToggleProperty?.(2, id)}
           />
         ) : null}
 
@@ -146,6 +177,7 @@ export default function PropertyFilters({
 function AreaPanel({
   index, label, area, radius, filters, color, count, showCount,
   onChangeArea, onChangeFilters, onChangeRadius, placeholderHint,
+  propsInArea = [], selectedIds, onToggleProperty,
 }) {
   return (
     <section className="px-4 py-3 border-b border-slate-800">
@@ -182,11 +214,12 @@ function AreaPanel({
         </button>
       )}
 
-      {/* Filters */}
+      {/* Filters — checkbox-style rows so it matches the property checklist below
+          and the user can clearly see which listing types are active. */}
       <div className="text-[9.5px] uppercase tracking-wider text-slate-500 font-semibold mb-1.5">
         Listing type
       </div>
-      <div className="grid grid-cols-2 gap-1.5 mb-3">
+      <div className="space-y-1 mb-3">
         {PROPERTY_FILTERS.map((f) => {
           const active = filters.has(f.value);
           return (
@@ -199,15 +232,23 @@ function AreaPanel({
                 else next.add(f.value);
                 onChangeFilters(next);
               }}
-              className={`text-[11px] text-left px-2 py-1.5 rounded border transition flex items-center gap-1.5 ${
+              className={`w-full flex items-center gap-2 px-2 py-1.5 rounded border transition text-left ${
                 active
                   ? "border-current font-semibold"
-                  : "border-slate-700 bg-slate-900 text-slate-300 hover:border-slate-500"
+                  : "border-slate-800 bg-slate-950 hover:border-slate-600"
               }`}
-              style={active ? { color: f.color, background: `${f.color}15`, borderColor: `${f.color}55` } : undefined}
+              style={active ? { color: f.color, background: `${f.color}12`, borderColor: `${f.color}55` } : undefined}
             >
-              <span>{f.icon}</span>
-              <span>{f.label}</span>
+              <span
+                className={`w-4 h-4 rounded border shrink-0 flex items-center justify-center text-[10px] font-bold ${
+                  active ? "text-slate-900" : "border-slate-600 text-transparent"
+                }`}
+                style={active ? { background: f.color, borderColor: f.color } : undefined}
+              >
+                ✓
+              </span>
+              <span className="text-base shrink-0">{f.icon}</span>
+              <span className="text-[11.5px] flex-1">{f.label}</span>
             </button>
           );
         })}
@@ -233,6 +274,71 @@ function AreaPanel({
           </button>
         ))}
       </div>
+
+      {/* ----- Properties in this area — checkbox list ----- */}
+      <div className="text-[9.5px] uppercase tracking-wider text-slate-500 font-semibold mt-3 mb-1.5 flex items-center justify-between">
+        <span>
+          Properties in this area · {propsInArea.length}
+        </span>
+        {selectedIds && propsInArea.length > 0 ? (
+          <span className="text-cyan-300 tabular-nums">
+            {[...selectedIds].filter((id) => propsInArea.some((p) => p.id === id)).length} on map
+          </span>
+        ) : null}
+      </div>
+      {propsInArea.length === 0 ? (
+        <div className="text-[10.5px] text-slate-500 italic">
+          {area
+            ? "No matching properties in this radius. Try a different filter or radius."
+            : "Set a location to see properties."}
+        </div>
+      ) : (
+        <div className="space-y-1 max-h-72 overflow-y-auto scrollbar-thin pr-1">
+          {propsInArea.map((p) => {
+            const checked = !!selectedIds?.has(p.id);
+            const priceText = p.listing === "rent"
+              ? `AED ${Math.round(p.price/1000)}K/y`
+              : p.price >= 1_000_000
+                ? `AED ${(p.price/1_000_000).toFixed(1)}M`
+                : `AED ${Math.round(p.price/1000)}K`;
+            return (
+              <button
+                key={p.id}
+                type="button"
+                onClick={() => onToggleProperty?.(p.id)}
+                className={`w-full flex items-center gap-2 px-2 py-1.5 rounded border transition text-left ${
+                  checked
+                    ? "border-amber-500/40 bg-amber-500/10"
+                    : "border-slate-800 bg-slate-950 hover:border-slate-600"
+                }`}
+              >
+                <span
+                  className={`w-4 h-4 rounded border shrink-0 flex items-center justify-center text-[10px] font-bold ${
+                    checked
+                      ? "bg-amber-500 border-amber-500 text-slate-900"
+                      : "border-slate-600 text-transparent"
+                  }`}
+                >
+                  ✓
+                </span>
+                <span
+                  className="w-2.5 h-2.5 rounded-full shrink-0"
+                  style={{ background: p._color || "#64748b" }}
+                />
+                <div className="flex-1 min-w-0">
+                  <div className="text-[11.5px] font-medium text-slate-100 truncate">{p.title}</div>
+                  <div className="text-[9.5px] text-slate-500 truncate">
+                    {p.building} · {p.area}
+                  </div>
+                </div>
+                <span className="text-[10.5px] text-amber-300 font-semibold tabular-nums shrink-0">
+                  {priceText}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      )}
     </section>
   );
 }

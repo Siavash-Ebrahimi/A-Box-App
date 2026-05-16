@@ -5,6 +5,7 @@
 // (no backend / no signup) — see lib/agent/storage.js.
 
 import { useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import AgentSidebar from "@/components/agent/AgentSidebar";
 import AgentBootstrap from "@/components/agent/AgentBootstrap";
 import DashboardView from "@/components/agent/DashboardView";
@@ -33,7 +34,8 @@ import {
   updateICase as persistUpdateICase,
   removeICase as persistRemoveICase,
 } from "@/lib/agent/storage";
-import { ICASE_TEMPLATES, seedNotifications } from "@/lib/agent/iCases";
+// Templates removed — i-Cases are now authored from scratch in the workspace at
+// /agent-hub/case/[id], using the rule library in lib/agent/iCaseRules.js.
 
 // Convert a Nominatim address object into a short, human-friendly label.
 // Picks the most specific neighbourhood-ish field, then city, then country.
@@ -49,6 +51,7 @@ function formatAddress(addr) {
 }
 
 export default function AgentHubPage() {
+  const router = useRouter();
   const [view, setView] = useState("dashboard");
   const [zones, setZones] = useState([]);
   const [favourites, setFavourites] = useState(() => new Set());
@@ -129,11 +132,14 @@ export default function AgentHubPage() {
   }
 
   // ---- i-Case handlers ----
+  // After creating an i-Case (name + description only), open its dedicated
+  // workspace at /agent-hub/case/[id] where the agent builds the actual
+  // automation rules.
   function handleAddICase(payload) {
-    const template = ICASE_TEMPLATES[payload.templateKey] || null;
-    const seed = template ? seedNotifications(template) : [];
-    const next = persistAddICase({ ...payload, notifications: seed });
+    const next = persistAddICase({ ...payload, notifications: [] });
     setICases(next);
+    const created = next[next.length - 1];
+    if (created?.id && router) router.push(`/agent-hub/case/${created.id}`);
   }
   function handleUpdateICase(id, patch) {
     const next = persistUpdateICase(id, patch);
@@ -228,6 +234,7 @@ export default function AgentHubPage() {
             onAddICase={handleAddICase}
             onUpdateICase={handleUpdateICase}
             onRemoveICase={handleRemoveICase}
+            onOpenICase={(id) => router.push(`/agent-hub/case/${id}`)}
           />
         ) : view === "areas" ? (
           <AreasView

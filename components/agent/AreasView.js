@@ -1,11 +1,18 @@
 "use client";
 
 import dynamic from "next/dynamic";
-import { useEffect, useState } from "react";
-import { ACTIVITY_TYPES } from "@/lib/agent/mockProperties";
+import { useEffect, useMemo, useState } from "react";
+import { ACTIVITY_TYPES, PROPERTIES } from "@/lib/agent/mockProperties";
 import { FREE_TIER_MAX_ZONES } from "@/lib/agent/storage";
+import { metersBetween } from "@/lib/agent/distance";
+import { pickDemoHighlights } from "@/lib/property/suggestedDemos";
+import { fillWithSynthetics } from "@/lib/property/synthetic";
 
 const AreaMap = dynamic(() => import("./AreaMap"), { ssr: false });
+// Same picker the Property + Business sections use: "Use my current location"
+// or "Pick a location on the map". Shown the first time the agent opens
+// Working Areas (and only the first time per visit).
+const LocationPicker = dynamic(() => import("@/components/LocationPicker"), { ssr: false });
 
 const RADIUS_PRESETS = [
   { value: 500,  label: "500 m"  },
@@ -28,8 +35,136 @@ export default function AreasView({ zones, onAddZone, onRemoveZone, focusZoneId,
   const [customRadius, setCustomRadius] = useState("");
   const [pendingActivities, setPendingActivities] = useState(["sell", "buy", "rent"]);
 
+  // Show the LocationPicker the first time this view is opened (unless the
+  // agent already has saved zones — they've been here before).
+  const [pickerDone, setPickerDone] = useState(() => zones.length > 0);
+  function handleLocationChosen(loc) {
+    setPickerDone(true);
+    // Auto-drop a pending pin at the chosen location so demo properties
+    // show up on the map immediately (per the user's #5 priority).
+    if (!reachedLimit) {
+      setPending({ lat: loc.latitude, lng: loc.longitude });
+    }
+  }
+
   const reachedLimit = zones.length >= FREE_TIER_MAX_ZONES;
   const canSave = !!pending && pendingActivities.length > 0 && !reachedLimit;
+
+  // 2–3 suggested hotspots for the most relevant zone on screen:
+  //   - while configuring a new pending pin → suggest inside the pending circle
+  //   - else if a saved zone is focused → suggest inside that one
+  //   - else → no suggestions (avoids clutter when several zones share the map)
+  const suggestionTarget = pending
+    ? { lat: pending.lat, lng: pending.lng, radius: pendingRadius }
+    : focusZone
+      ? { lat: focusZone.lat, lng: focusZone.lng, radius: focusZone.radius }
+      : null;
+  // No more clustered suggestion stars — we highlight 1–2 random property pins
+  // inside each visible zone with a gold halo so the user immediately sees demo
+  // candidates to click into. Computed after visibleProperties so we can pick from
+  // exactly what's on screen.
+
+  // Property markers visible on the map. Strategy:
+  //   - While a pin is pending → show properties inside the pending circle
+  //     (filtered by the activities the agent has tick-boxed for the new zone),
+  //     topped up with synthetic demos so the user always sees at least 3.
+  //   - Else → show properties for EVERY saved zone (each zone's activities apply),
+  //     also topped up with synthetics per zone.
+  const TARGET_PER_ZONE = 3;
+  const visibleProperties = useMemo(() => {
+    if (pending) {
+      const real = PROPERTIES.filter((p) => {
+        const inRadius = metersBetween(p.lat, p.lng, pending.lat, pending.lng) <= pendingRadius;
+        if (!inRadius) return false;
+        if (pendingActivities.length === 0) return true;
+        const acts = p.activities || [];
+        return pendingActivities.some((a) => acts.includes(a));
+      });
+      return fillWithSynthetics({
+        properties: real,
+        center: { lat: pending.lat, lng: pending.lng },
+        radius: pendingRadius,
+        target: TARGET_PER_ZONE,
+        seed: `pending|${pending.lat.toFixed(4)},${pending.lng.toFixed(4)},${pendingRadius}`,
+        activeFilters: pendingActivities,
+      });
+    }
+    if (!zones || zones.length === 0) return [];
+    const seen = new Set();
+    const out = [];
+    for (const z of zones) {
+      const zoneActs = z.activities || [];
+      const real = [];
+      for (const p of PROPERTIES) {
+        if (seen.has(p.id)) continue;
+        const inRadius = metersBetween(p.lat, p.lng, z.lat, z.lng) <= z.radius;
+        if (!inRadius) continue;
+        const acts = p.activities || [];
+        if (zoneActs.length > 0 && !zoneActs.some((a) => acts.includes(a))) continue;
+        seen.add(p.id);
+        real.push(p);
+      }
+      const filled = fillWithSynthetics({
+        properties: real,
+        center: { lat: z.lat, lng: z.lng },
+        radius: z.radius,
+        target: TARGET_PER_ZONE,
+        seed: `zone|${z.id}|${z.radius}`,
+        activeFilters: zoneActs,
+      });
+      for (const p of filled) {
+        if (seen.has(p.id)) continue;
+        seen.add(p.id);
+        out.push(p);
+      }
+    }
+    return out;
+  }, [
+    zones,
+    pending,
+    pendingRadius,
+    pendingActivities.join(","),
+  ]);
+
+  // ---- User-controlled selection ----
+  // The set of property IDs the user has currently ticked in the sidebar
+  // checklist. Only these render as pins on the map.
+  // When the pending pin / its radius / its activities change, we auto-tick
+  // 2–3 random demo properties from inside the radius so the agent always
+  // sees dummies appear the moment they click the map.
+  const [selectedIds, setSelectedIds] = useState(() => new Set());
+
+  useEffect(() => {
+    if (!visibleProperties || visibleProperties.length === 0) {
+      setSelectedIds(new Set());
+      return;
+    }
+    // Default seed based on the current "active context":
+    //   - pending pin → seed off its coords+radius
+    //   - else (browsing saved zones) → seed off the list of zone IDs
+    const seed = pending
+      ? `${pending.lat.toFixed(4)},${pending.lng.toFixed(4)},${pendingRadius}`
+      : zones.map((z) => z.id).join("|");
+    const effectiveRadius = pending ? pendingRadius : (focusZone?.radius || 1000);
+    setSelectedIds(pickDemoHighlights(visibleProperties, effectiveRadius, seed));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    pending?.lat, pending?.lng, pendingRadius, pendingActivities.join(","),
+    zones.map((z) => z.id).join("|"),
+    focusZone?.id,
+  ]);
+
+  function toggleSelected(propertyId) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(propertyId)) next.delete(propertyId);
+      else next.add(propertyId);
+      return next;
+    });
+  }
+
+  // Properties actually rendered as pins on the map.
+  const mapProperties = visibleProperties.filter((p) => selectedIds.has(p.id));
 
   function handleCancel() {
     setPending(null);
@@ -54,30 +189,16 @@ export default function AreasView({ zones, onAddZone, onRemoveZone, focusZoneId,
     );
   }
 
+  // Gate: ask the agent where they want to work first (matches Business + Property).
+  if (!pickerDone) {
+    return <LocationPicker onLocationChosen={handleLocationChosen} />;
+  }
+
   return (
     <div className="flex h-full">
-      {/* Map */}
-      <div className="flex-1 relative">
-        <AreaMap
-          savedZones={zones}
-          pending={pending}
-          pendingRadius={pendingRadius}
-          focusZone={focusZone}
-          onPick={(p) => !reachedLimit && setPending(p)}
-        />
-        {!pending && zones.length === 0 ? (
-          <div className="absolute top-4 left-1/2 -translate-x-1/2 z-[500] pointer-events-none">
-            <div className="bg-slate-900/95 border border-cyan-500/40 rounded-lg shadow-2xl px-4 py-2.5 backdrop-blur">
-              <span className="text-xs text-cyan-300 font-semibold">
-                Click anywhere on the map to drop your first working zone
-              </span>
-            </div>
-          </div>
-        ) : null}
-      </div>
-
-      {/* Right config rail */}
-      <div className="w-[340px] shrink-0 border-l border-slate-800 bg-slate-950 flex flex-col">
+      {/* Left config rail (was on the right — moved to match the Property
+          section so radius + property checklist always live on the LEFT). */}
+      <div className="w-[340px] shrink-0 border-r border-slate-800 bg-slate-950 flex flex-col">
         {/* Plan / quota banner */}
         <PlanBanner used={zones.length} limit={FREE_TIER_MAX_ZONES} />
 
@@ -192,13 +313,22 @@ export default function AreasView({ zones, onAddZone, onRemoveZone, focusZoneId,
 
         {reachedLimit ? <GoldUpsell zonesUsed={zones.length} limit={FREE_TIER_MAX_ZONES} /> : null}
 
+        {/* ---- Properties in this area — checkbox list ----
+            Toggling adds/removes the matching pin on the map in real time. */}
+        <PropertyChecklist
+          properties={visibleProperties}
+          selectedIds={selectedIds}
+          onToggle={toggleSelected}
+          contextLabel={pending ? "in this new zone" : (zones.length > 0 ? "across your saved zones" : null)}
+        />
+
         <div className="px-4 py-3 border-b border-slate-800 flex items-center justify-between">
           <div className="text-[10px] uppercase tracking-wider text-slate-400 font-semibold">
             Saved zones · {zones.length}
           </div>
         </div>
 
-        <div className="flex-1 overflow-y-auto scrollbar-thin px-4 py-3 space-y-2">
+        <div className="overflow-y-auto scrollbar-thin px-4 py-3 space-y-2 max-h-64">
           {zones.length === 0 ? (
             <div className="text-[11px] text-slate-500 leading-relaxed">
               No zones yet. Click the map to drop a pin, choose a radius and activities, then
@@ -209,6 +339,90 @@ export default function AreasView({ zones, onAddZone, onRemoveZone, focusZoneId,
           )}
         </div>
       </div>
+
+      {/* Map (flex-1) */}
+      <div className="flex-1 relative">
+        <AreaMap
+          savedZones={zones}
+          pending={pending}
+          pendingRadius={pendingRadius}
+          focusZone={focusZone}
+          properties={mapProperties}
+          onPick={(p) => !reachedLimit && setPending(p)}
+        />
+        {!pending && zones.length === 0 ? (
+          <div className="absolute top-4 left-1/2 -translate-x-1/2 z-[500] pointer-events-none">
+            <div className="bg-slate-900/95 border border-cyan-500/40 rounded-lg shadow-2xl px-4 py-2.5 backdrop-blur">
+              <span className="text-xs text-cyan-300 font-semibold">
+                Click anywhere on the map to drop your first working zone
+              </span>
+            </div>
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+// Checkbox list of properties currently in scope. Tapping a row toggles its pin
+// on/off the map instantly — the parent owns the `selectedIds` Set.
+function PropertyChecklist({ properties, selectedIds, onToggle, contextLabel }) {
+  const onCount = [...(selectedIds || [])].filter((id) => properties.some((p) => p.id === id)).length;
+  return (
+    <div className="px-4 py-3 border-b border-slate-800">
+      <div className="flex items-center justify-between mb-1.5">
+        <div className="text-[10px] uppercase tracking-wider text-slate-400 font-semibold">
+          Properties {contextLabel ? <span className="text-slate-500 normal-case tracking-normal">· {contextLabel}</span> : null} · {properties.length}
+        </div>
+        {properties.length > 0 ? (
+          <span className="text-[10px] text-cyan-300 tabular-nums">{onCount} on map</span>
+        ) : null}
+      </div>
+      {properties.length === 0 ? (
+        <div className="text-[10.5px] text-slate-500 italic">
+          {contextLabel ? "No matches for the current activities — try ticking more." : "Drop a pin to see properties appear here."}
+        </div>
+      ) : (
+        <div className="space-y-1 max-h-64 overflow-y-auto scrollbar-thin pr-1">
+          {properties.map((p) => {
+            const checked = !!selectedIds?.has(p.id);
+            const priceText = p.listing === "rent"
+              ? `AED ${Math.round(p.price/1000)}K/y`
+              : p.price >= 1_000_000
+                ? `AED ${(p.price/1_000_000).toFixed(1)}M`
+                : `AED ${Math.round(p.price/1000)}K`;
+            return (
+              <button
+                key={p.id}
+                type="button"
+                onClick={() => onToggle?.(p.id)}
+                className={`w-full flex items-center gap-2 px-2 py-1.5 rounded border transition text-left ${
+                  checked
+                    ? "border-amber-500/40 bg-amber-500/10"
+                    : "border-slate-800 bg-slate-950 hover:border-slate-600"
+                }`}
+              >
+                <span
+                  className={`w-4 h-4 rounded border shrink-0 flex items-center justify-center text-[10px] font-bold ${
+                    checked
+                      ? "bg-amber-500 border-amber-500 text-slate-900"
+                      : "border-slate-600 text-transparent"
+                  }`}
+                >
+                  ✓
+                </span>
+                <div className="flex-1 min-w-0">
+                  <div className="text-[11.5px] font-medium text-slate-100 truncate">{p.title}</div>
+                  <div className="text-[9.5px] text-slate-500 truncate">{p.building} · {p.area}</div>
+                </div>
+                <span className="text-[10.5px] text-amber-300 font-semibold tabular-nums shrink-0">
+                  {priceText}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

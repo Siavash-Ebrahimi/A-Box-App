@@ -7,6 +7,12 @@ import { filterPropertiesByZones } from "@/lib/agent/distance";
 import { AI_AGENTS } from "@/lib/agent/aiAgents";
 import { PERSONAS } from "@/lib/agent/personas";
 import { ICASE_TEMPLATES } from "@/lib/agent/iCases";
+
+// Default look for workspace-built i-Cases (no template key).
+const WORKSPACE_DEFAULT_META = { icon: "🤖", color: "#06b6d4", category: "Custom workspace" };
+function metaFor(iCase) {
+  return ICASE_TEMPLATES[iCase?.templateKey] || WORKSPACE_DEFAULT_META;
+}
 import { FREE_TIER_MAX_ICASES } from "@/lib/agent/storage";
 import ZoneSettingsModal from "./ZoneSettingsModal";
 import ICaseBuilder from "./ICaseBuilder";
@@ -26,6 +32,7 @@ export default function DashboardView({
   onAddICase,
   onUpdateICase,
   onRemoveICase,
+  onOpenICase,
 }) {
   const [settingsZone, setSettingsZone] = useState(null);
   const [builderState, setBuilderState] = useState(null); // null | { editing: null|case }
@@ -121,9 +128,10 @@ export default function DashboardView({
               }
               onApproveAll={() =>
                 onUpdateICase(c.id, {
-                  notifications: c.notifications.map((n) => ({ ...n, approved: true })),
+                  notifications: (c.notifications || []).map((n) => ({ ...n, approved: true })),
                 })
               }
+              onOpen={() => onOpenICase?.(c.id)}
             />
           ))}
 
@@ -310,7 +318,7 @@ function Assignments({ agentKeys = [], customerKeys = [], relatedICases = [] }) 
         <div className="flex items-center gap-1.5 flex-wrap">
           <span className="uppercase tracking-wider text-slate-500 w-12 shrink-0">i-Cases</span>
           {relatedICases.map((c) => {
-            const t = ICASE_TEMPLATES[c.templateKey];
+            const t = metaFor(c);
             return (
               <span
                 key={c.id}
@@ -350,8 +358,8 @@ function ChipStack({ keys, source }) {
 
 // ----- i-Case card -----------------------------------------------------------
 
-function ICaseCard({ iCase, zones, onEdit, onRemove, onTogglePause, onApproveAll }) {
-  const t = ICASE_TEMPLATES[iCase.templateKey];
+function ICaseCard({ iCase, zones, onEdit, onRemove, onTogglePause, onApproveAll, onOpen }) {
+  const t = metaFor(iCase);
   const pending = (iCase.notifications || []).filter((n) => !n.approved).length;
   const linkedZones = zones.filter((z) => iCase.zoneIds?.includes(z.id));
 
@@ -385,17 +393,35 @@ function ICaseCard({ iCase, zones, onEdit, onRemove, onTogglePause, onApproveAll
       </div>
 
       <div className="p-3 space-y-2.5">
-        {t ? (
-          <>
-            <div className="text-[11.5px] text-slate-300 leading-snug">{t.description}</div>
-            <div className="text-[10.5px] text-slate-400 leading-relaxed">
-              <strong className="text-slate-300">Trigger:</strong> {t.trigger}
-            </div>
-            <ol className="text-[10.5px] text-slate-300 list-decimal list-inside space-y-0.5">
-              {t.steps.slice(0, 4).map((s, i) => <li key={i}>{s}</li>)}
-            </ol>
-          </>
+        {/* Description: either the workspace-author's description, or the legacy
+            template's blurb. Trigger/steps only render for legacy template-based
+            i-Cases — workspace-built i-Cases show their actual rule count instead. */}
+        {iCase.description ? (
+          <div className="text-[11.5px] text-slate-300 leading-snug">{iCase.description}</div>
+        ) : t?.description ? (
+          <div className="text-[11.5px] text-slate-300 leading-snug">{t.description}</div>
         ) : null}
+
+        {t?.trigger ? (
+          <div className="text-[10.5px] text-slate-400 leading-relaxed">
+            <strong className="text-slate-300">Trigger:</strong> {t.trigger}
+          </div>
+        ) : null}
+
+        {Array.isArray(t?.steps) && t.steps.length > 0 ? (
+          <ol className="text-[10.5px] text-slate-300 list-decimal list-inside space-y-0.5">
+            {t.steps.slice(0, 4).map((s, i) => <li key={i}>{s}</li>)}
+          </ol>
+        ) : (iCase.rules && iCase.rules.length > 0) ? (
+          <div className="text-[10.5px] text-slate-400">
+            <strong className="text-slate-300">{iCase.rules.length}</strong>{" "}
+            rule{iCase.rules.length === 1 ? "" : "s"} configured in the workspace.
+          </div>
+        ) : (
+          <div className="text-[10.5px] text-slate-500 italic">
+            No rules yet — open the workspace to compose your automation.
+          </div>
+        )}
 
         {/* Linked zones / agents / customers */}
         <div className="text-[10px] space-y-1 pt-1 border-t border-slate-800">
@@ -456,15 +482,24 @@ function ICaseCard({ iCase, zones, onEdit, onRemove, onTogglePause, onApproveAll
         <div className="flex gap-1.5">
           <button
             type="button"
-            onClick={onEdit}
-            className="flex-1 text-[11px] px-2 py-1.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 transition"
+            onClick={onOpen}
+            className="flex-1 text-[11px] px-2 py-1.5 rounded bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-200 font-semibold transition"
+            title="Open this i-Case in its workspace"
           >
-            Edit
+            ⚡ Open
+          </button>
+          <button
+            type="button"
+            onClick={onEdit}
+            className="text-[11px] px-2 py-1.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 transition"
+            title="Rename or edit description"
+          >
+            Rename
           </button>
           <button
             type="button"
             onClick={onTogglePause}
-            className="flex-1 text-[11px] px-2 py-1.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 transition"
+            className="text-[11px] px-2 py-1.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 transition"
           >
             {iCase.status === "paused" ? "Resume" : "Pause"}
           </button>

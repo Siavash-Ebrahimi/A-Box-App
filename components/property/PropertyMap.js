@@ -20,6 +20,8 @@ L.Icon.Default.mergeOptions({
 });
 
 const AREA_COLORS = ["#3b82f6", "#10b981"];
+const GOLD_HIGHLIGHT = "#facc15";
+const CHECK_GREEN    = "#22c55e";
 
 // Map clicks → parent decides which area they update.
 function ClickRelay({ onMapClick }) {
@@ -49,26 +51,18 @@ function priceLabel(p) {
   return p.listing === "rent" ? `${v}/y` : v;
 }
 
-// Custom property pin — drop-shape with filter colour and a small price label.
-// A teal/blue ring is added when the property is the user's selection for compare.
-function propertyIcon(color, price, selected, selectionRank) {
-  const ring = selected
-    ? `<circle cx="22" cy="22" r="20" fill="none" stroke="#06b6d4" stroke-width="3"/>`
-    : "";
-  const badge = selected && selectionRank
-    ? `<circle cx="36" cy="8" r="8" fill="#06b6d4" stroke="white" stroke-width="2"/>
-       <text x="36" y="11.5" text-anchor="middle" font-size="10" font-weight="800" fill="white" font-family="-apple-system,sans-serif">${selectionRank}</text>`
-    : "";
+// Plain property pin — drop-shape with filter colour and price label.
+// No check badges; "selected" state lives in the sidebar checklist instead.
+// A pin only appears on the map at all when its property is checked in the sidebar.
+function propertyIcon({ color, price }) {
   const html = `
     <svg width="44" height="56" viewBox="0 0 44 56" xmlns="http://www.w3.org/2000/svg" style="filter: drop-shadow(0 2px 3px rgba(0,0,0,0.55));">
-      ${ring}
       <path d="M22 4 C 11 4 4 12 4 22 C 4 33 22 52 22 52 C 22 52 40 33 40 22 C 40 12 33 4 22 4 Z"
             fill="${color}" stroke="#ffffff" stroke-width="2"/>
       <rect x="11" y="14" width="22" height="12" rx="2.5" fill="#ffffff"/>
       <text x="22" y="23" text-anchor="middle" font-size="9.5" font-weight="800"
             font-family="-apple-system,BlinkMacSystemFont,sans-serif"
             fill="${color}">${price}</text>
-      ${badge}
     </svg>`;
   return L.divIcon({
     className: "property-pin",
@@ -82,13 +76,11 @@ function propertyIcon(color, price, selected, selectionRank) {
 export default function PropertyMap({
   area1, radius1,
   area2, radius2,
-  properties,            // already filtered by area + filters
-  onMapClick,            // (latlng) → parent updates area1 or area2
-  flyTarget,             // optional center to fly to
-  onPropertyClick,       // (property) → parent opens detail / sets compare slot
-  comparePick1Id,        // property ID currently picked as compare slot 1
-  comparePick2Id,        // property ID currently picked as compare slot 2
-  initialCenter = { lat: 25.1972, lng: 55.2744 }, // Downtown Dubai default
+  properties,            // ONLY the user-checked subset, ready to render as pins
+  onMapClick,
+  flyTarget,
+  onPropertyClick,
+  initialCenter = { lat: 25.1972, lng: 55.2744 },
 }) {
   return (
     <MapContainer
@@ -137,13 +129,10 @@ export default function PropertyMap({
         />
       ) : null}
 
-      {/* Property pins */}
+      {/* Property pins — only the ones the user has checked in the sidebar.
+          Plain drop-pins; no check badges (selection state lives in the sidebar). */}
       {properties.map((p) => {
-        const isPick1 = comparePick1Id === p.id;
-        const isPick2 = comparePick2Id === p.id;
-        const selected = isPick1 || isPick2;
-        const rank = isPick1 ? 1 : isPick2 ? 2 : null;
-        const icon = propertyIcon(p._color, priceLabel(p), selected, rank);
+        const icon = propertyIcon({ color: p._color, price: priceLabel(p) });
         return (
           <Marker
             key={p.id}
