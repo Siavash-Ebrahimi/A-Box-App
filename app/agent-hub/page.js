@@ -12,6 +12,7 @@ import DashboardView from "@/components/agent/DashboardView";
 import AreasView from "@/components/agent/AreasView";
 import PropertiesView from "@/components/agent/PropertiesView";
 import ChatView from "@/components/agent/ChatView";
+import CommonProjectsView from "@/components/agent/CommonProjectsView";
 import { PROPERTIES } from "@/lib/agent/mockProperties";
 import { filterPropertiesByZones } from "@/lib/agent/distance";
 import {
@@ -29,6 +30,7 @@ import {
   bootstrapAsDemo,
   bootstrapAsCustom,
   deleteCustomAgent,
+  updateProfile,
   loadICases,
   addICase as persistAddICase,
   updateICase as persistUpdateICase,
@@ -115,6 +117,13 @@ export default function AgentHubPage() {
     deleteCustomAgent();
     setProfile({ name: "", company: "" });
     setBootstrap(null);
+  }
+  // Rename / re-brand the active agent profile. Both the demo and custom
+  // profiles are editable — saved zones/chats are tied to the browser, not
+  // the profile name, so renaming is non-destructive.
+  function handleRenameAgent({ name, company }) {
+    const next = updateProfile({ name, company });
+    setProfile(next);
   }
 
   // ---- zone handlers ----
@@ -219,6 +228,7 @@ export default function AgentHubPage() {
         chats={chats}
         onSelectPersona={handleSelectPersonaFromSidebar}
         onDeleteAgent={handleDeleteAgent}
+        onRenameAgent={handleRenameAgent}
       />
 
       <main className="flex-1 min-w-0">
@@ -242,8 +252,11 @@ export default function AgentHubPage() {
             focusZoneId={focusZoneId}
             onClearFocus={() => setFocusZoneId(null)}
             onAddZone={handleAddZone}
+            onUpdateZone={handleUpdateZone}
             onRemoveZone={handleRemoveZone}
           />
+        ) : view === "common-projects" ? (
+          <CommonProjectsView zones={zones} profile={profile} />
         ) : view === "properties" ? (
           <PropertiesView
             zones={zones}

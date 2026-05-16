@@ -2,17 +2,34 @@
 
 import dynamic from "next/dynamic";
 import { useEffect, useMemo, useState } from "react";
-import { ACTIVITY_TYPES, PROPERTIES } from "@/lib/agent/mockProperties";
-import { FREE_TIER_MAX_ZONES } from "@/lib/agent/storage";
+import { PROPERTIES } from "@/lib/agent/mockProperties";
+import {
+  FREE_TIER_MAX_ZONES,
+  loadZoneLayers,
+  updateZoneLayer,
+  DEFAULT_ZONE_LAYER,
+  loadFavourites,
+  toggleFavourite as persistToggleFavourite,
+  loadZoneBusinessSummaries,
+  updateZoneBusinessSummary,
+  clearZoneBusinessSummary,
+} from "@/lib/agent/storage";
 import { metersBetween } from "@/lib/agent/distance";
-import { pickDemoHighlights } from "@/lib/property/suggestedDemos";
-import { fillWithSynthetics } from "@/lib/property/synthetic";
+import { fillPerFilterSynthetics } from "@/lib/property/synthetic";
+import { loadUserProperties, addUserProperty } from "@/lib/property/userProperties";
+import { loadUserBusinesses, addUserBusiness } from "@/lib/business/userBusinesses";
+import {
+  PROPERTY_FILTER_BY_VALUE,
+  ALL_PROPERTY_FILTER_VALUES,
+} from "@/lib/property/filters";
+import AddPropertyForm from "@/components/property/AddPropertyForm";
+import AddBusinessForm from "./AddBusinessForm";
+import ZoneLayerDrawer from "./ZoneLayerDrawer";
+import ZoneRibbonsStack from "./ZoneRibbonsStack";
 
 const AreaMap = dynamic(() => import("./AreaMap"), { ssr: false });
-// Same picker the Property + Business sections use: "Use my current location"
-// or "Pick a location on the map". Shown the first time the agent opens
-// Working Areas (and only the first time per visit).
 const LocationPicker = dynamic(() => import("@/components/LocationPicker"), { ssr: false });
+const FullAnalysisModal = dynamic(() => import("@/components/FullAnalysisModal"), { ssr: false });
 
 const RADIUS_PRESETS = [
   { value: 500,  label: "500 m"  },
@@ -20,157 +37,215 @@ const RADIUS_PRESETS = [
   { value: 1500, label: "1.5 km" },
 ];
 
-export default function AreasView({ zones, onAddZone, onRemoveZone, focusZoneId, onClearFocus }) {
+// Per-filter target — the user spec is "3 random non-overlapping pins per
+// activated property type". Synthetic.js handles the separation pass.
+const TARGET_PER_FILTER = 3;
+
+// Three top-level map modes — only one is active at a time. Drives what a
+// map click means:
+//   "idle"  → click selects the zone you clicked inside (or deselects)
+//   "add"   → click drops a new pending zone pin
+//   "edit"  → click moves the editing zone's centre to that location
+//             (zone id stored in `editZoneId`)
+const MODE = { IDLE: "idle", ADD: "add", EDIT: "edit" };
+
+export default function AreasView({
+  zones,
+  onAddZone,
+  onUpdateZone,
+  onRemoveZone,
+  focusZoneId,
+  onClearFocus,
+}) {
   const focusZone = focusZoneId ? zones.find((z) => z.id === focusZoneId) : null;
-  // Auto-clear focus on unmount so navigating away and back doesn't re-fly to the same zone.
   useEffect(() => {
     if (focusZoneId) {
       const t = setTimeout(() => onClearFocus?.(), 800);
       return () => clearTimeout(t);
     }
   }, [focusZoneId, onClearFocus]);
+
+  // ---- Map mode + zone selection
+  const [mode, setMode] = useState(MODE.IDLE);
+  const [editZoneId, setEditZoneId] = useState(null);
+  const [selectedZoneId, setSelectedZoneId] = useState(null);
+
+  // ---- Pending-zone config (only used while mode === ADD)
   const [pending, setPending] = useState(null);
   const [pendingRadius, setPendingRadius] = useState(1000);
   const [pendingLabel, setPendingLabel] = useState("");
   const [customRadius, setCustomRadius] = useState("");
-  const [pendingActivities, setPendingActivities] = useState(["sell", "buy", "rent"]);
 
-  // Show the LocationPicker the first time this view is opened (unless the
-  // agent already has saved zones — they've been here before).
+  // ---- Picker gate
   const [pickerDone, setPickerDone] = useState(() => zones.length > 0);
   function handleLocationChosen(loc) {
     setPickerDone(true);
-    // Auto-drop a pending pin at the chosen location so demo properties
-    // show up on the map immediately (per the user's #5 priority).
-    if (!reachedLimit) {
+    // First-time agents land directly in "add" mode at their location so
+    // they can drop a zone immediately.
+    if (zones.length === 0 && !reachedLimit) {
+      setMode(MODE.ADD);
       setPending({ lat: loc.latitude, lng: loc.longitude });
     }
   }
 
-  const reachedLimit = zones.length >= FREE_TIER_MAX_ZONES;
-  const canSave = !!pending && pendingActivities.length > 0 && !reachedLimit;
+  // ---- Property/Business place-mode (Add Property / Add Business buttons)
+  const [userProperties, setUserProperties] = useState([]);
+  const [userBusinesses, setUserBusinesses] = useState([]);
+  const [placeMode, setPlaceMode] = useState(null);
+  const [pendingNewProperty, setPendingNewProperty] = useState(null);
+  const [pendingNewBusiness, setPendingNewBusiness] = useState(null);
+  useEffect(() => {
+    setUserProperties(loadUserProperties());
+    setUserBusinesses(loadUserBusinesses());
+  }, []);
+  const allProperties = useMemo(() => [...PROPERTIES, ...userProperties], [userProperties]);
 
-  // 2–3 suggested hotspots for the most relevant zone on screen:
-  //   - while configuring a new pending pin → suggest inside the pending circle
-  //   - else if a saved zone is focused → suggest inside that one
-  //   - else → no suggestions (avoids clutter when several zones share the map)
-  const suggestionTarget = pending
-    ? { lat: pending.lat, lng: pending.lng, radius: pendingRadius }
-    : focusZone
-      ? { lat: focusZone.lat, lng: focusZone.lng, radius: focusZone.radius }
-      : null;
-  // No more clustered suggestion stars — we highlight 1–2 random property pins
-  // inside each visible zone with a gold halo so the user immediately sees demo
-  // candidates to click into. Computed after visibleProperties so we can pick from
-  // exactly what's on screen.
+  // ---- Favourites
+  const [favourites, setFavourites] = useState(() => new Set());
+  useEffect(() => { setFavourites(loadFavourites()); }, []);
+  function toggleFavourite(propertyId) {
+    persistToggleFavourite(propertyId);
+    setFavourites(loadFavourites());
+  }
 
-  // Property markers visible on the map. Strategy:
-  //   - While a pin is pending → show properties inside the pending circle
-  //     (filtered by the activities the agent has tick-boxed for the new zone),
-  //     topped up with synthetic demos so the user always sees at least 3.
-  //   - Else → show properties for EVERY saved zone (each zone's activities apply),
-  //     also topped up with synthetics per zone.
-  const TARGET_PER_ZONE = 3;
-  const visibleProperties = useMemo(() => {
-    if (pending) {
-      const real = PROPERTIES.filter((p) => {
-        const inRadius = metersBetween(p.lat, p.lng, pending.lat, pending.lng) <= pendingRadius;
-        if (!inRadius) return false;
-        if (pendingActivities.length === 0) return true;
-        const acts = p.activities || [];
-        return pendingActivities.some((a) => acts.includes(a));
-      });
-      return fillWithSynthetics({
-        properties: real,
-        center: { lat: pending.lat, lng: pending.lng },
-        radius: pendingRadius,
-        target: TARGET_PER_ZONE,
-        seed: `pending|${pending.lat.toFixed(4)},${pending.lng.toFixed(4)},${pendingRadius}`,
-        activeFilters: pendingActivities,
-      });
-    }
-    if (!zones || zones.length === 0) return [];
-    const seen = new Set();
-    const out = [];
+  // ---- Per-zone layer state
+  const [layers, setLayers] = useState({});
+  useEffect(() => { setLayers(loadZoneLayers()); }, []);
+
+  // Hydrate defaults: new zones auto-enable Property with every filter chip
+  // pre-selected (lit). propertyTouched=false → pins gated until user clicks
+  // a chip.
+  const layersForRender = useMemo(() => {
+    const out = {};
     for (const z of zones) {
-      const zoneActs = z.activities || [];
-      const real = [];
-      for (const p of PROPERTIES) {
-        if (seen.has(p.id)) continue;
-        const inRadius = metersBetween(p.lat, p.lng, z.lat, z.lng) <= z.radius;
-        if (!inRadius) continue;
-        const acts = p.activities || [];
-        if (zoneActs.length > 0 && !zoneActs.some((a) => acts.includes(a))) continue;
-        seen.add(p.id);
-        real.push(p);
-      }
-      const filled = fillWithSynthetics({
-        properties: real,
-        center: { lat: z.lat, lng: z.lng },
-        radius: z.radius,
-        target: TARGET_PER_ZONE,
-        seed: `zone|${z.id}|${z.radius}`,
-        activeFilters: zoneActs,
-      });
-      for (const p of filled) {
-        if (seen.has(p.id)) continue;
-        seen.add(p.id);
-        out.push(p);
+      const stored = layers[z.id];
+      if (stored) {
+        out[z.id] = { ...DEFAULT_ZONE_LAYER, ...stored };
+      } else {
+        out[z.id] = {
+          ...DEFAULT_ZONE_LAYER,
+          propertyOn: true,
+          propertyDrawerOpen: true,
+          propertyFilters: [...ALL_PROPERTY_FILTER_VALUES],
+          propertyTouched: false,
+        };
       }
     }
     return out;
-  }, [
-    zones,
-    pending,
-    pendingRadius,
-    pendingActivities.join(","),
-  ]);
+  }, [zones, layers]);
 
-  // ---- User-controlled selection ----
-  // The set of property IDs the user has currently ticked in the sidebar
-  // checklist. Only these render as pins on the map.
-  // When the pending pin / its radius / its activities change, we auto-tick
-  // 2–3 random demo properties from inside the radius so the agent always
-  // sees dummies appear the moment they click the map.
-  const [selectedIds, setSelectedIds] = useState(() => new Set());
-
-  useEffect(() => {
-    if (!visibleProperties || visibleProperties.length === 0) {
-      setSelectedIds(new Set());
-      return;
-    }
-    // Default seed based on the current "active context":
-    //   - pending pin → seed off its coords+radius
-    //   - else (browsing saved zones) → seed off the list of zone IDs
-    const seed = pending
-      ? `${pending.lat.toFixed(4)},${pending.lng.toFixed(4)},${pendingRadius}`
-      : zones.map((z) => z.id).join("|");
-    const effectiveRadius = pending ? pendingRadius : (focusZone?.radius || 1000);
-    setSelectedIds(pickDemoHighlights(visibleProperties, effectiveRadius, seed));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [
-    pending?.lat, pending?.lng, pendingRadius, pendingActivities.join(","),
-    zones.map((z) => z.id).join("|"),
-    focusZone?.id,
-  ]);
-
-  function toggleSelected(propertyId) {
-    setSelectedIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(propertyId)) next.delete(propertyId);
-      else next.add(propertyId);
+  function patchLayer(zoneId, patch) {
+    setLayers((curr) => {
+      const merged = { ...DEFAULT_ZONE_LAYER, ...(curr[zoneId] || {}), ...patch };
+      const next = { ...curr, [zoneId]: merged };
+      updateZoneLayer(zoneId, merged);
       return next;
     });
   }
 
-  // Properties actually rendered as pins on the map.
-  const mapProperties = visibleProperties.filter((p) => selectedIds.has(p.id));
+  function togglePropertyLayer(zoneId, on) {
+    patchLayer(zoneId, { propertyOn: !!on });
+    if (!on && placeMode?.kind === "property" && placeMode.zoneId === zoneId) setPlaceMode(null);
+  }
+  function toggleBusinessLayer(zoneId, on) {
+    patchLayer(zoneId, { businessOn: !!on });
+    if (!on && placeMode?.kind === "business" && placeMode.zoneId === zoneId) setPlaceMode(null);
+  }
+  function toggleExpanded(zoneId) {
+    const curr = layersForRender[zoneId] || DEFAULT_ZONE_LAYER;
+    patchLayer(zoneId, { expanded: !curr.expanded });
+  }
+  function togglePropertyDrawer(zoneId) {
+    const curr = layersForRender[zoneId] || DEFAULT_ZONE_LAYER;
+    patchLayer(zoneId, { propertyDrawerOpen: !curr.propertyDrawerOpen });
+  }
+  function toggleBusinessDrawer(zoneId) {
+    const curr = layersForRender[zoneId] || DEFAULT_ZONE_LAYER;
+    patchLayer(zoneId, { businessDrawerOpen: !curr.businessDrawerOpen });
+  }
+  function togglePropertyFilter(zoneId, value) {
+    const curr = layersForRender[zoneId]?.propertyFilters || [];
+    const next = curr.includes(value) ? curr.filter((v) => v !== value) : [...curr, value];
+    patchLayer(zoneId, { propertyFilters: next, propertyTouched: true });
+  }
+  function setBusinessCategory(zoneId, value) {
+    patchLayer(zoneId, { businessCategory: value });
+  }
 
-  function handleCancel() {
+  // ---- Selection helpers
+  function selectZone(zoneId) {
+    setSelectedZoneId((curr) => (curr === zoneId ? null : zoneId));
+    // Selecting a zone implicitly cancels edit/add modes if they target a
+    // different zone — keeps things unambiguous.
+    if (mode === MODE.EDIT && editZoneId !== zoneId) cancelEditMode();
+    if (mode === MODE.ADD) cancelAddMode();
+  }
+  function startEditMode(zoneId) {
+    setEditZoneId(zoneId);
+    setMode(MODE.EDIT);
+    setSelectedZoneId(zoneId);
+  }
+  function cancelEditMode() {
+    setEditZoneId(null);
+    setMode(MODE.IDLE);
+  }
+  function startAddMode() {
+    if (reachedLimit) return;
+    setMode(MODE.ADD);
+    setPending(null);     // wait for a click to drop the pin
+    setSelectedZoneId(null);
+  }
+  function cancelAddMode() {
+    setMode(MODE.IDLE);
     setPending(null);
     setPendingLabel("");
     setCustomRadius("");
-    setPendingActivities(["sell", "buy", "rent"]);
+  }
+
+  // Which zone (if any) is the user's circle inside? Used to "select-by-click"
+  // when the user clicks anywhere on the map in idle mode.
+  function zoneAt(latlng) {
+    for (const z of zones) {
+      if (metersBetween(latlng.lat, latlng.lng, z.lat, z.lng) <= z.radius) return z;
+    }
+    return null;
+  }
+
+  // ---- Map click handler
+  function handleMapPick(latlng) {
+    // Add Property / Add Business place-modes take priority over everything.
+    if (placeMode?.kind === "property") {
+      setPendingNewProperty({ lat: latlng.lat, lng: latlng.lng });
+      setPlaceMode(null);
+      return;
+    }
+    if (placeMode?.kind === "business") {
+      setPendingNewBusiness({ lat: latlng.lat, lng: latlng.lng, zoneId: placeMode.zoneId });
+      setPlaceMode(null);
+      return;
+    }
+
+    if (mode === MODE.ADD) {
+      setPending(latlng);
+      return;
+    }
+    if (mode === MODE.EDIT && editZoneId) {
+      onUpdateZone?.(editZoneId, { lat: latlng.lat, lng: latlng.lng, addressLabel: null });
+      cancelEditMode();
+      return;
+    }
+    // Idle: select the zone you clicked inside (or deselect if you clicked
+    // outside every zone). This is the "only work on existing zones unless +"
+    // behaviour the user asked for.
+    const z = zoneAt(latlng);
+    setSelectedZoneId(z ? z.id : null);
+  }
+
+  const reachedLimit = zones.length >= FREE_TIER_MAX_ZONES;
+  const canSave = !!pending && !reachedLimit;
+
+  function handleCancel() {
+    cancelAddMode();
   }
   function handleSave() {
     if (!canSave) return;
@@ -179,42 +254,335 @@ export default function AreasView({ zones, onAddZone, onRemoveZone, focusZoneId,
       lng: pending.lng,
       radius: pendingRadius,
       label: pendingLabel.trim() || `Zone ${zones.length + 1}`,
-      activities: pendingActivities,
+      activities: ["sell", "buy", "rent"],
     });
-    handleCancel();
+    cancelAddMode();
   }
-  function toggleActivity(value) {
-    setPendingActivities((curr) =>
-      curr.includes(value) ? curr.filter((v) => v !== value) : [...curr, value],
+
+  // ---- Per-zone property pool — 3 random pins per active chip, with the
+  // non-overlap separation pass baked into fillPerFilterSynthetics.
+  const { propsByZone, propertyCounts, unionForMap } = useMemo(() => {
+    const byZone = {};
+    const counts = {};
+    const union = new Map();
+
+    for (const z of zones) {
+      const layer = layersForRender[z.id] || DEFAULT_ZONE_LAYER;
+      if (!layer.propertyOn) { byZone[z.id] = []; counts[z.id] = 0; continue; }
+      const filters = layer.propertyFilters || [];
+      if (filters.length === 0) { byZone[z.id] = []; counts[z.id] = 0; continue; }
+
+      // Real properties inside the circle, with a generic "in radius" gate.
+      const realInRadius = allProperties.filter(
+        (p) => metersBetween(p.lat, p.lng, z.lat, z.lng) <= z.radius,
+      );
+      const filled = fillPerFilterSynthetics({
+        realProperties: realInRadius,
+        matchesFilter: (p, f) => PROPERTY_FILTER_BY_VALUE[f]?.matches(p) || false,
+        center: { lat: z.lat, lng: z.lng },
+        radius: z.radius,
+        activeFilters: filters,
+        targetPerFilter: TARGET_PER_FILTER,
+        seed: `zone|${z.id}|${z.radius}|${filters.join(",")}`,
+      });
+      byZone[z.id] = filled;
+      counts[z.id] = filled.length;
+      for (const p of filled) {
+        if (!union.has(p.id)) union.set(p.id, p);
+      }
+    }
+    return { propsByZone: byZone, propertyCounts: counts, unionForMap: [...union.values()] };
+  }, [zones, layersForRender, allProperties]);
+
+  // Pending-zone preview pins — gives the agent visual feedback the moment
+  // they drop the dashed-yellow circle.
+  const pendingPreviewProps = useMemo(() => {
+    if (!pending) return [];
+    const realInRadius = allProperties.filter(
+      (p) => metersBetween(p.lat, p.lng, pending.lat, pending.lng) <= pendingRadius,
+    );
+    return fillPerFilterSynthetics({
+      realProperties: realInRadius,
+      matchesFilter: (p, f) => PROPERTY_FILTER_BY_VALUE[f]?.matches(p) || false,
+      center: { lat: pending.lat, lng: pending.lng },
+      radius: pendingRadius,
+      activeFilters: ["rent", "sell"],
+      targetPerFilter: 2,
+      seed: `pending|${pending.lat.toFixed(4)},${pending.lng.toFixed(4)},${pendingRadius}`,
+    });
+  }, [pending?.lat, pending?.lng, pendingRadius, allProperties]);
+
+  // ---- Map pins: union of every zone whose Property layer is on AND
+  // propertyTouched is true. If a zone is selected, restrict to that one zone
+  // (the user's single-focus spec).
+  const mapProperties = useMemo(() => {
+    const out = new Map();
+    const considerZones = selectedZoneId
+      ? zones.filter((z) => z.id === selectedZoneId)
+      : zones;
+    for (const z of considerZones) {
+      const layer = layersForRender[z.id] || DEFAULT_ZONE_LAYER;
+      if (!layer.propertyOn || !layer.propertyTouched) continue;
+      const list = propsByZone[z.id] || [];
+      for (const p of list) {
+        if (!out.has(p.id)) out.set(p.id, p);
+      }
+    }
+    if (pending) {
+      for (const p of pendingPreviewProps) {
+        if (!out.has(p.id)) out.set(p.id, p);
+      }
+    }
+    return [...out.values()];
+  }, [propsByZone, zones, layersForRender, selectedZoneId, pending, pendingPreviewProps]);
+
+  // Zones with Property on but no chip touched yet — drives the "tap a chip"
+  // hint banner.
+  const awaitingTouchZones = useMemo(() => zones.filter((z) => {
+    const l = layersForRender[z.id];
+    if (!l || !l.propertyOn || l.propertyTouched) return false;
+    if (selectedZoneId && z.id !== selectedZoneId) return false;
+    return true;
+  }), [zones, layersForRender, selectedZoneId]);
+
+  // ---- Business analyse flow per zone
+  const [businessResults, setBusinessResults] = useState({});
+  const [businessLoading, setBusinessLoading] = useState({});
+  const [reportZoneId, setReportZoneId] = useState(null);
+
+  // Restore the slim summaries so the dashboard cards stay accurate after a
+  // navigation between views.
+  useEffect(() => {
+    const summaries = loadZoneBusinessSummaries();
+    if (Object.keys(summaries).length === 0) return;
+    setBusinessResults((curr) => {
+      const next = { ...curr };
+      for (const [zid, s] of Object.entries(summaries)) {
+        if (next[zid]) continue;
+        next[zid] = {
+          _summaryOnly: true,
+          category: s.category,
+          gold: new Array(s.goldCount || 0).fill(null).map((_, i) => ({ _placeholder: true, _i: i })),
+          silver: new Array(s.silverCount || 0).fill(null).map((_, i) => ({ _placeholder: true, _i: i })),
+          bronze: new Array(s.bronzeCount || 0).fill(null).map((_, i) => ({ _placeholder: true, _i: i })),
+          analyzedAt: s.analyzedAt,
+        };
+      }
+      return next;
+    });
+  }, []);
+
+  async function analyzeBusiness(zoneId) {
+    const z = zones.find((x) => x.id === zoneId);
+    if (!z) return;
+    const layer = { ...DEFAULT_ZONE_LAYER, ...(layers[zoneId] || {}) };
+    setBusinessLoading((m) => ({ ...m, [zoneId]: true }));
+    setBusinessResults((m) => {
+      const { [zoneId]: _drop, ...rest } = m;
+      return rest;
+    });
+    try {
+      const phase1 = await fetch("/api/analyze", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          latitude: z.lat,
+          longitude: z.lng,
+          radius: z.radius,
+          businessType: layer.businessCategory || "mens_salon",
+          cityHint: z.addressLabel?.split(",")[0] || null,
+        }),
+      });
+      const phase1Data = await safeJson(phase1, "analysis");
+      if (!phase1.ok) throw new Error(phase1Data?.error || `Analysis failed (HTTP ${phase1.status})`);
+      setBusinessResults((m) => ({
+        ...m,
+        [zoneId]: { ...phase1Data, loadingOverview: true, loadingDetails: true },
+      }));
+      setBusinessLoading((m) => ({ ...m, [zoneId]: false }));
+
+      // Persist a slim summary so the dashboard can show it later.
+      updateZoneBusinessSummary(zoneId, {
+        category: layer.businessCategory || "mens_salon",
+        goldCount: (phase1Data.gold || []).length,
+        silverCount: (phase1Data.silver || []).length,
+        bronzeCount: (phase1Data.bronze || []).length,
+        totalCommercial: phase1Data.meta?.totalCommercial || 0,
+        analyzedAt: Date.now(),
+      });
+
+      const all = [
+        ...(phase1Data.gold || []),
+        ...(phase1Data.silver || []),
+        ...(phase1Data.bronze || []),
+      ];
+      const topStreets = all.slice(0, 5).map((s) => ({
+        street: s.street, tier: s.tier, score: s.score,
+        breakdown: s.breakdown, highway: s.highway, center: s.center,
+      }));
+      const ctx = phase1Data.enrichContext || {};
+      const meta = phase1Data.meta || {};
+      const recommendations = phase1Data.recommendations || [];
+
+      fetch("/api/enrich-overview", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...ctx, topStreets, meta }),
+      })
+        .then((r) => safeJson(r, "overview").then((data) => ({ r, data })))
+        .then(({ r, data }) => {
+          if (!r.ok) throw new Error(data?.error || `Overview failed (HTTP ${r.status})`);
+          setBusinessResults((m) => {
+            const prev = m[zoneId];
+            if (!prev) return m;
+            return {
+              ...m,
+              [zoneId]: {
+                ...prev,
+                report: data.report || prev.report,
+                competitorInsights: data.competitorInsights || prev.competitorInsights,
+                successFactors: data.successFactors || prev.successFactors,
+                agencies: data.agencies || prev.agencies,
+                loadingOverview: false,
+                overviewError: null,
+              },
+            };
+          });
+        })
+        .catch((err) => {
+          setBusinessResults((m) => {
+            const prev = m[zoneId];
+            if (!prev) return m;
+            return { ...m, [zoneId]: { ...prev, loadingOverview: false, overviewError: err.message || "Overview unavailable" } };
+          });
+        });
+
+      fetch("/api/enrich-details", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...ctx, topStreets, recommendations }),
+      })
+        .then((r) => safeJson(r, "details").then((data) => ({ r, data })))
+        .then(({ r, data }) => {
+          if (!r.ok) throw new Error(data?.error || `Details failed (HTTP ${r.status})`);
+          const byStreet = new Map((data.explanations || []).map((e) => [e.street, e]));
+          const upgrade = (s) => {
+            const m2 = byStreet.get(s.street);
+            return m2 ? { ...s, explanation: m2.text, explanationSource: m2.source } : s;
+          };
+          setBusinessResults((m) => {
+            const prev = m[zoneId];
+            if (!prev) return m;
+            return {
+              ...m,
+              [zoneId]: {
+                ...prev,
+                gold: (prev.gold || []).map(upgrade),
+                silver: (prev.silver || []).map(upgrade),
+                bronze: (prev.bronze || []).map(upgrade),
+                recommendations: (prev.recommendations || []).map((rec, i) => {
+                  const reason = data.recReasons?.[i];
+                  return reason ? { ...rec, reason: reason.text, reasonSource: reason.source } : rec;
+                }),
+                loadingDetails: false,
+                detailsError: null,
+              },
+            };
+          });
+        })
+        .catch((err) => {
+          setBusinessResults((m) => {
+            const prev = m[zoneId];
+            if (!prev) return m;
+            return { ...m, [zoneId]: { ...prev, loadingDetails: false, detailsError: err.message || "Details unavailable" } };
+          });
+        });
+    } catch (e) {
+      setBusinessResults((m) => ({ ...m, [zoneId]: { error: e.message || "Analysis failed" } }));
+      setBusinessLoading((m) => ({ ...m, [zoneId]: false }));
+      clearZoneBusinessSummary(zoneId);
+    }
+  }
+
+  function startAddProperty(zoneId) {
+    setPlaceMode((curr) =>
+      curr?.kind === "property" && curr.zoneId === zoneId ? null : { kind: "property", zoneId },
+    );
+  }
+  function startAddBusiness(zoneId) {
+    setPlaceMode((curr) =>
+      curr?.kind === "business" && curr.zoneId === zoneId ? null : { kind: "business", zoneId },
     );
   }
 
-  // Gate: ask the agent where they want to work first (matches Business + Property).
   if (!pickerDone) {
     return <LocationPicker onLocationChosen={handleLocationChosen} />;
   }
 
+  const reportZone = reportZoneId ? zones.find((z) => z.id === reportZoneId) : null;
+  const reportLayer = reportZone ? (layersForRender[reportZone.id] || DEFAULT_ZONE_LAYER) : null;
+  const reportResult = reportZone ? businessResults[reportZone.id] : null;
+  // Don't open the report modal for summary-only stubs (no `report` field yet).
+  const reportReady = reportResult && !reportResult._summaryOnly && reportResult.report;
+
+  const propertyPlaceZoneId = placeMode?.kind === "property" ? placeMode.zoneId : null;
+  const businessPlaceZoneId = placeMode?.kind === "business" ? placeMode.zoneId : null;
+
+  // For radar: pick up zones currently loading a business analysis.
+  const radarZones = zones.filter((z) => businessLoading[z.id]);
+
   return (
     <div className="flex h-full">
-      {/* Left config rail (was on the right — moved to match the Property
-          section so radius + property checklist always live on the LEFT). */}
-      <div className="w-[340px] shrink-0 border-r border-slate-800 bg-slate-950 flex flex-col">
-        {/* Plan / quota banner */}
+      {/* ---- LEFT RAIL ---- */}
+      <div className="w-[360px] shrink-0 border-r border-slate-800 bg-slate-950 flex flex-col">
         <PlanBanner used={zones.length} limit={FREE_TIER_MAX_ZONES} />
 
-        {pending && !reachedLimit ? (
-          <div className="p-4 border-b border-slate-800 overflow-y-auto scrollbar-thin">
+        {/* Mode controls: + Add Zone button + (in add mode) the pending-zone
+            config panel. */}
+        <div className="px-4 py-3 border-b border-slate-800 space-y-2">
+          {mode !== MODE.ADD ? (
+            <button
+              type="button"
+              onClick={startAddMode}
+              disabled={reachedLimit}
+              className={`w-full text-[12px] font-semibold px-3 py-2 rounded border transition ${
+                reachedLimit
+                  ? "border-slate-800 bg-slate-900 text-slate-600 cursor-not-allowed"
+                  : "border-amber-500/50 bg-amber-500/10 hover:bg-amber-500/20 text-amber-200"
+              }`}
+              title={reachedLimit ? "Free-plan limit reached — upgrade to Gold" : "Click here, then click the map to drop a new zone"}
+            >
+              + Add a new zone
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={cancelAddMode}
+              className="w-full text-[12px] font-semibold px-3 py-2 rounded border border-amber-400 bg-amber-500/20 text-amber-100 transition"
+            >
+              ⏳ Click the map to place · Cancel
+            </button>
+          )}
+          {mode === MODE.IDLE && zones.length > 0 ? (
+            <div className="text-[10.5px] text-slate-500 leading-relaxed">
+              Click a zone in the list or on the map to select it. Click ✎ on a
+              card to relocate it. Use <strong>+ Add a new zone</strong> when you
+              want to add another patch.
+            </div>
+          ) : null}
+        </div>
+
+        {mode === MODE.ADD && pending ? (
+          <div className="p-4 border-b border-slate-800">
             <div className="text-[10px] uppercase tracking-wider text-amber-300 font-semibold mb-2">
               New working zone
             </div>
-            <div className="text-[11px] text-slate-400 mb-3 leading-relaxed">
-              {pending.lat.toFixed(4)}, {pending.lng.toFixed(4)} — drag the pin by clicking
-              somewhere else on the map.
+            <div className="text-[11px] text-slate-400 mb-3 leading-relaxed tabular-nums">
+              {pending.lat.toFixed(4)}, {pending.lng.toFixed(4)} — click elsewhere on the
+              map to move this pin.
             </div>
 
-            <label className="block text-[10px] uppercase tracking-wider text-slate-400 mb-1">
-              Label
-            </label>
+            <label className="block text-[10px] uppercase tracking-wider text-slate-400 mb-1">Label</label>
             <input
               type="text"
               value={pendingLabel}
@@ -223,9 +591,7 @@ export default function AreasView({ zones, onAddZone, onRemoveZone, focusZoneId,
               className="w-full mb-3 bg-slate-900 border border-slate-700 rounded px-2.5 py-1.5 text-xs focus:outline-none focus:border-amber-500"
             />
 
-            <label className="block text-[10px] uppercase tracking-wider text-slate-400 mb-1">
-              Radius
-            </label>
+            <label className="block text-[10px] uppercase tracking-wider text-slate-400 mb-1">Radius</label>
             <div className="grid grid-cols-3 gap-2 mb-2">
               {RADIUS_PRESETS.map((r) => (
                 <button
@@ -256,40 +622,10 @@ export default function AreasView({ zones, onAddZone, onRemoveZone, focusZoneId,
                 placeholder="Custom (m)"
                 className="flex-1 bg-slate-900 border border-slate-700 rounded px-2.5 py-1.5 text-xs focus:outline-none focus:border-amber-500"
               />
-              <span className="text-[11px] text-slate-500 self-center">
+              <span className="text-[11px] text-slate-500 self-center tabular-nums">
                 {(pendingRadius / 1000).toFixed(2)} km
               </span>
             </div>
-
-            {/* Activity multi-select — what should this zone surface? */}
-            <label className="block text-[10px] uppercase tracking-wider text-slate-400 mb-1.5">
-              Activities · {pendingActivities.length} selected
-            </label>
-            <div className="grid grid-cols-2 gap-1.5 mb-4">
-              {ACTIVITY_TYPES.map((a) => {
-                const on = pendingActivities.includes(a.value);
-                return (
-                  <button
-                    key={a.value}
-                    type="button"
-                    onClick={() => toggleActivity(a.value)}
-                    className={`text-[11px] px-2 py-1.5 rounded border flex items-center gap-1.5 transition ${
-                      on
-                        ? `${a.color} font-semibold`
-                        : "border-slate-700 bg-slate-900 text-slate-400 hover:border-slate-500"
-                    }`}
-                  >
-                    <span>{a.icon}</span>
-                    <span>{a.label}</span>
-                  </button>
-                );
-              })}
-            </div>
-            {pendingActivities.length === 0 ? (
-              <div className="text-[10px] text-amber-300/80 mb-2">
-                Pick at least one activity — that determines what shows in this zone.
-              </div>
-            ) : null}
 
             <div className="flex gap-2">
               <button
@@ -311,120 +647,215 @@ export default function AreasView({ zones, onAddZone, onRemoveZone, focusZoneId,
           </div>
         ) : null}
 
-        {reachedLimit ? <GoldUpsell zonesUsed={zones.length} limit={FREE_TIER_MAX_ZONES} /> : null}
-
-        {/* ---- Properties in this area — checkbox list ----
-            Toggling adds/removes the matching pin on the map in real time. */}
-        <PropertyChecklist
-          properties={visibleProperties}
-          selectedIds={selectedIds}
-          onToggle={toggleSelected}
-          contextLabel={pending ? "in this new zone" : (zones.length > 0 ? "across your saved zones" : null)}
-        />
+        {reachedLimit ? <GoldUpsell limit={FREE_TIER_MAX_ZONES} /> : null}
 
         <div className="px-4 py-3 border-b border-slate-800 flex items-center justify-between">
           <div className="text-[10px] uppercase tracking-wider text-slate-400 font-semibold">
-            Saved zones · {zones.length}
+            Working zones · {zones.length}
           </div>
+          {selectedZoneId ? (
+            <button
+              type="button"
+              onClick={() => setSelectedZoneId(null)}
+              className="text-[10px] text-cyan-300 hover:text-cyan-200 transition"
+              title="Clear zone selection (show all ribbons again)"
+            >
+              ⛒ Clear selection
+            </button>
+          ) : null}
         </div>
-
-        <div className="overflow-y-auto scrollbar-thin px-4 py-3 space-y-2 max-h-64">
+        <div className="flex-1 overflow-y-auto scrollbar-thin px-4 py-3 space-y-2">
           {zones.length === 0 ? (
-            <div className="text-[11px] text-slate-500 leading-relaxed">
-              No zones yet. Click the map to drop a pin, choose a radius and activities, then
-              save. You can have up to {FREE_TIER_MAX_ZONES} zones on the free plan.
+            <div className="text-[11px] text-slate-500 leading-relaxed p-3 rounded border border-dashed border-slate-700 bg-slate-900/30">
+              No zones yet. Click <strong>+ Add a new zone</strong> above, then
+              click anywhere on the map to drop a pin.
             </div>
           ) : (
-            zones.map((z, i) => <ZoneCard key={z.id} z={z} index={i} onRemove={() => onRemoveZone(z.id)} />)
+            zones.map((z, i) => (
+              <ZoneLayerDrawer
+                key={z.id}
+                zone={z}
+                index={i}
+                layer={layersForRender[z.id] || DEFAULT_ZONE_LAYER}
+                businessResult={businessResults[z.id]}
+                businessLoading={!!businessLoading[z.id]}
+                selected={selectedZoneId === z.id}
+                editingLocation={mode === MODE.EDIT && editZoneId === z.id}
+                onSelectZone={() => selectZone(z.id)}
+                onEditZone={() => startEditMode(z.id)}
+                onCancelEditZone={cancelEditMode}
+                onToggleExpanded={() => toggleExpanded(z.id)}
+                onTogglePropertyLayer={(on) => togglePropertyLayer(z.id, on)}
+                onToggleBusinessLayer={(on) => toggleBusinessLayer(z.id, on)}
+                onTogglePropertyDrawer={() => togglePropertyDrawer(z.id)}
+                onToggleBusinessDrawer={() => toggleBusinessDrawer(z.id)}
+                onAddProperty={() => startAddProperty(z.id)}
+                onAddBusiness={() => startAddBusiness(z.id)}
+                onAnalyzeBusiness={() => analyzeBusiness(z.id)}
+                onViewBusinessReport={() => setReportZoneId(z.id)}
+                onRemoveZone={() => onRemoveZone(z.id)}
+                onFocusZone={() => onClearFocus?.()}
+              />
+            ))
           )}
         </div>
       </div>
 
-      {/* Map (flex-1) */}
+      {/* ---- MAP + RIBBONS ---- */}
       <div className="flex-1 relative">
         <AreaMap
           savedZones={zones}
-          pending={pending}
+          selectedZoneId={selectedZoneId}
+          editingZoneId={mode === MODE.EDIT ? editZoneId : null}
+          pending={mode === MODE.ADD ? pending : null}
           pendingRadius={pendingRadius}
           focusZone={focusZone}
           properties={mapProperties}
-          onPick={(p) => !reachedLimit && setPending(p)}
+          businessByZone={businessResults}
+          userBusinesses={userBusinesses}
+          favourites={favourites}
+          onToggleFavourite={toggleFavourite}
+          onPick={handleMapPick}
+          radarZones={radarZones}
         />
-        {!pending && zones.length === 0 ? (
+
+        <ZoneRibbonsStack
+          zones={zones}
+          layers={layersForRender}
+          selectedZoneId={selectedZoneId}
+          propertyMatchesByZone={propertyCounts}
+          onToggleFilter={togglePropertyFilter}
+          onAddProperty={startAddProperty}
+          placeModeZoneId={propertyPlaceZoneId}
+          businessResults={businessResults}
+          businessLoading={businessLoading}
+          onCategoryChange={setBusinessCategory}
+          onAnalyzeBusiness={analyzeBusiness}
+          onViewBusinessReport={(zoneId) => setReportZoneId(zoneId)}
+          onAddBusiness={startAddBusiness}
+          addBusinessModeZoneId={businessPlaceZoneId}
+        />
+
+        {/* Awaiting-chip hint (per the "tap to reveal" gate) */}
+        {awaitingTouchZones.length > 0 && !placeMode && mode !== MODE.ADD ? (
+          <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-[450] pointer-events-none max-w-md text-center">
+            <div className="bg-slate-900/90 border border-amber-500/50 rounded-lg shadow-2xl px-5 py-3 backdrop-blur">
+              <div className="text-amber-300 text-[10.5px] uppercase tracking-wider font-bold mb-1">
+                ☝ Choose your property types
+              </div>
+              <div className="text-[12px] text-slate-100 leading-snug">
+                Tap any chip in the Property ribbon to start surfacing pins on the map.
+                Each activated chip drops 3 random examples inside the zone radius.
+              </div>
+            </div>
+          </div>
+        ) : null}
+
+        {/* Mode banner: place-mode / edit / first-zone hint */}
+        {placeMode ? (
+          <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-[500]">
+            <div className={`rounded-lg shadow-2xl px-4 py-2.5 backdrop-blur max-w-md ${
+              placeMode.kind === "property"
+                ? "bg-amber-500/95 text-slate-900"
+                : "bg-cyan-500/95 text-slate-900"
+            }`}>
+              <div className="text-xs font-bold uppercase tracking-wider">
+                {placeMode.kind === "property" ? "📍 Drop a new property" : "🏪 Drop a new business"}
+              </div>
+              <div className="text-[11.5px] mt-0.5 leading-snug">
+                Zoom in close, then click the map to place the pin inside
+                Zone {zones.findIndex((z) => z.id === placeMode.zoneId) + 1}.
+              </div>
+            </div>
+          </div>
+        ) : mode === MODE.EDIT && editZoneId ? (
+          <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-[500]">
+            <div className="rounded-lg shadow-2xl px-4 py-2.5 backdrop-blur max-w-md bg-amber-500/95 text-slate-900">
+              <div className="text-xs font-bold uppercase tracking-wider">✎ Edit zone location</div>
+              <div className="text-[11.5px] mt-0.5 leading-snug">
+                Click anywhere on the map to move Zone {zones.findIndex((z) => z.id === editZoneId) + 1}'s
+                centre. Click ✎ in the sidebar to cancel.
+              </div>
+            </div>
+          </div>
+        ) : mode === MODE.ADD && !pending ? (
+          <div className="absolute top-4 left-1/2 -translate-x-1/2 z-[500] pointer-events-none">
+            <div className="bg-slate-900/95 border border-amber-500/40 rounded-lg shadow-2xl px-4 py-2.5 backdrop-blur">
+              <span className="text-xs text-amber-300 font-semibold">
+                Click anywhere on the map to drop your new zone
+              </span>
+            </div>
+          </div>
+        ) : !pending && zones.length === 0 && mode === MODE.IDLE ? (
           <div className="absolute top-4 left-1/2 -translate-x-1/2 z-[500] pointer-events-none">
             <div className="bg-slate-900/95 border border-cyan-500/40 rounded-lg shadow-2xl px-4 py-2.5 backdrop-blur">
               <span className="text-xs text-cyan-300 font-semibold">
-                Click anywhere on the map to drop your first working zone
+                Click <strong>+ Add a new zone</strong> in the sidebar to start
               </span>
             </div>
           </div>
         ) : null}
       </div>
+
+      {/* Add Property modal */}
+      {pendingNewProperty ? (
+        <AddPropertyForm
+          coords={pendingNewProperty}
+          onClose={() => setPendingNewProperty(null)}
+          onSave={(form) => {
+            const next = addUserProperty(form);
+            setUserProperties(next);
+            setPendingNewProperty(null);
+          }}
+        />
+      ) : null}
+
+      {/* Add Business modal */}
+      {pendingNewBusiness ? (
+        <AddBusinessForm
+          coords={{ lat: pendingNewBusiness.lat, lng: pendingNewBusiness.lng }}
+          defaultCategory={
+            (layersForRender[pendingNewBusiness.zoneId]?.businessCategory) || "mens_salon"
+          }
+          onClose={() => setPendingNewBusiness(null)}
+          onSave={(form) => {
+            const next = addUserBusiness({ ...form, zoneId: pendingNewBusiness.zoneId });
+            setUserBusinesses(next);
+            setPendingNewBusiness(null);
+          }}
+        />
+      ) : null}
+
+      {/* Business report modal */}
+      {reportZone && reportReady ? (
+        <FullAnalysisModal
+          result={reportResult}
+          category={reportLayer?.businessCategory || "mens_salon"}
+          location={{
+            latitude: reportZone.lat,
+            longitude: reportZone.lng,
+            city: reportZone.addressLabel?.split(",")[0] || "",
+          }}
+          onClose={() => setReportZoneId(null)}
+        />
+      ) : null}
     </div>
   );
 }
 
-// Checkbox list of properties currently in scope. Tapping a row toggles its pin
-// on/off the map instantly — the parent owns the `selectedIds` Set.
-function PropertyChecklist({ properties, selectedIds, onToggle, contextLabel }) {
-  const onCount = [...(selectedIds || [])].filter((id) => properties.some((p) => p.id === id)).length;
-  return (
-    <div className="px-4 py-3 border-b border-slate-800">
-      <div className="flex items-center justify-between mb-1.5">
-        <div className="text-[10px] uppercase tracking-wider text-slate-400 font-semibold">
-          Properties {contextLabel ? <span className="text-slate-500 normal-case tracking-normal">· {contextLabel}</span> : null} · {properties.length}
-        </div>
-        {properties.length > 0 ? (
-          <span className="text-[10px] text-cyan-300 tabular-nums">{onCount} on map</span>
-        ) : null}
-      </div>
-      {properties.length === 0 ? (
-        <div className="text-[10.5px] text-slate-500 italic">
-          {contextLabel ? "No matches for the current activities — try ticking more." : "Drop a pin to see properties appear here."}
-        </div>
-      ) : (
-        <div className="space-y-1 max-h-64 overflow-y-auto scrollbar-thin pr-1">
-          {properties.map((p) => {
-            const checked = !!selectedIds?.has(p.id);
-            const priceText = p.listing === "rent"
-              ? `AED ${Math.round(p.price/1000)}K/y`
-              : p.price >= 1_000_000
-                ? `AED ${(p.price/1_000_000).toFixed(1)}M`
-                : `AED ${Math.round(p.price/1000)}K`;
-            return (
-              <button
-                key={p.id}
-                type="button"
-                onClick={() => onToggle?.(p.id)}
-                className={`w-full flex items-center gap-2 px-2 py-1.5 rounded border transition text-left ${
-                  checked
-                    ? "border-amber-500/40 bg-amber-500/10"
-                    : "border-slate-800 bg-slate-950 hover:border-slate-600"
-                }`}
-              >
-                <span
-                  className={`w-4 h-4 rounded border shrink-0 flex items-center justify-center text-[10px] font-bold ${
-                    checked
-                      ? "bg-amber-500 border-amber-500 text-slate-900"
-                      : "border-slate-600 text-transparent"
-                  }`}
-                >
-                  ✓
-                </span>
-                <div className="flex-1 min-w-0">
-                  <div className="text-[11.5px] font-medium text-slate-100 truncate">{p.title}</div>
-                  <div className="text-[9.5px] text-slate-500 truncate">{p.building} · {p.area}</div>
-                </div>
-                <span className="text-[10.5px] text-amber-300 font-semibold tabular-nums shrink-0">
-                  {priceText}
-                </span>
-              </button>
-            );
-          })}
-        </div>
-      )}
-    </div>
-  );
+async function safeJson(res, label = "request") {
+  const text = await res.text();
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    if (res.status === 504 || res.status === 502 || text.startsWith("An error")) {
+      throw new Error(
+        `The ${label} took too long and was cut off by the server. Try a smaller zone radius and retry.`,
+      );
+    }
+    throw new Error(`Server returned a non-JSON response (HTTP ${res.status}).`);
+  }
 }
 
 function PlanBanner({ used, limit }) {
@@ -445,13 +876,13 @@ function PlanBanner({ used, limit }) {
         </span>
       </div>
       <div className="text-[11px] text-slate-400">
-        Free plan includes {limit} working zones. Upgrade to <span className="text-amber-300 font-semibold">Gold</span> for unlimited zones.
+        Select a zone to focus its Property & Business ribbons on the map.
       </div>
     </div>
   );
 }
 
-function GoldUpsell({ zonesUsed, limit }) {
+function GoldUpsell({ limit }) {
   return (
     <div className="m-4 p-4 rounded-lg border border-amber-500/50 bg-gradient-to-br from-amber-500/15 to-amber-700/5">
       <div className="flex items-center gap-2 mb-1.5">
@@ -461,9 +892,8 @@ function GoldUpsell({ zonesUsed, limit }) {
         <span className="text-sm font-semibold text-amber-200">Unlock unlimited zones</span>
       </div>
       <div className="text-[11.5px] text-slate-300 leading-relaxed mb-3">
-        You've used all {limit} free working zones. Upgrade to a Gold membership for
-        unlimited zones across Dubai, plus priority AI processing and partner-network
-        access.
+        You've used all {limit} free working zones. Upgrade to Gold for unlimited zones
+        across Dubai, plus priority AI processing.
       </div>
       <button
         type="button"
@@ -472,53 +902,6 @@ function GoldUpsell({ zonesUsed, limit }) {
       >
         ⭐ Upgrade to Gold
       </button>
-      <div className="text-[10px] text-slate-500 mt-2">
-        Or remove one of your existing zones below to free up a slot.
-      </div>
-    </div>
-  );
-}
-
-function ZoneCard({ z, index, onRemove }) {
-  const palette = ["#3b82f6", "#10b981", "#f59e0b", "#a855f7", "#06b6d4", "#ec4899"];
-  const acts = z.activities || [];
-  const labels = ACTIVITY_TYPES.filter((a) => acts.includes(a.value));
-  return (
-    <div className="p-2.5 rounded border border-slate-700 bg-slate-900/50">
-      <div className="flex items-center gap-2">
-        <span
-          className="inline-block w-2.5 h-2.5 rounded-full shrink-0"
-          style={{ background: palette[index % palette.length] }}
-        />
-        <span className="text-xs font-medium text-slate-100 truncate flex-1">
-          {z.label}
-        </span>
-        <button
-          type="button"
-          onClick={onRemove}
-          className="text-[11px] text-slate-500 hover:text-red-400 transition"
-          title="Remove zone"
-        >
-          ✕
-        </button>
-      </div>
-      <div className="text-[10px] text-slate-500 mt-1 tabular-nums">
-        {z.lat.toFixed(4)}, {z.lng.toFixed(4)} · {(z.radius / 1000).toFixed(2)} km
-      </div>
-      {labels.length > 0 ? (
-        <div className="flex flex-wrap gap-1 mt-1.5">
-          {labels.map((a) => (
-            <span
-              key={a.value}
-              className={`text-[9.5px] uppercase tracking-wider px-1.5 py-0.5 rounded border ${a.color}`}
-            >
-              {a.icon} {a.label}
-            </span>
-          ))}
-        </div>
-      ) : (
-        <div className="text-[10px] text-slate-500 mt-1.5 italic">All activities</div>
-      )}
     </div>
   );
 }

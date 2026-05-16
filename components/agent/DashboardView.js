@@ -1,19 +1,25 @@
 "use client";
 
 import dynamic from "next/dynamic";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { PROPERTIES, ACTIVITY_TYPES, formatPrice } from "@/lib/agent/mockProperties";
 import { filterPropertiesByZones } from "@/lib/agent/distance";
 import { AI_AGENTS } from "@/lib/agent/aiAgents";
 import { PERSONAS } from "@/lib/agent/personas";
 import { ICASE_TEMPLATES } from "@/lib/agent/iCases";
+import {
+  loadZoneLayers,
+  loadZoneBusinessSummaries,
+} from "@/lib/agent/storage";
+import { PROPERTY_FILTER_BY_VALUE } from "@/lib/property/filters";
+import { BUSINESS_CATEGORIES } from "./BusinessRibbon";
 
 // Default look for workspace-built i-Cases (no template key).
 const WORKSPACE_DEFAULT_META = { icon: "🤖", color: "#06b6d4", category: "Custom workspace" };
 function metaFor(iCase) {
   return ICASE_TEMPLATES[iCase?.templateKey] || WORKSPACE_DEFAULT_META;
 }
-import { FREE_TIER_MAX_ICASES } from "@/lib/agent/storage";
+import { FREE_TIER_MAX_ICASES, FREE_TIER_MAX_ZONES } from "@/lib/agent/storage";
 import ZoneSettingsModal from "./ZoneSettingsModal";
 import ICaseBuilder from "./ICaseBuilder";
 
@@ -37,7 +43,18 @@ export default function DashboardView({
   const [settingsZone, setSettingsZone] = useState(null);
   const [builderState, setBuilderState] = useState(null); // null | { editing: null|case }
 
+  // Pull the per-zone layer state + business-analysis summaries so each snap
+  // card can show what the agent has actually configured (active property
+  // filters + which business categories they've analysed).
+  const [zoneLayers, setZoneLayers] = useState({});
+  const [bizSummaries, setBizSummaries] = useState({});
+  useEffect(() => {
+    setZoneLayers(loadZoneLayers());
+    setBizSummaries(loadZoneBusinessSummaries());
+  }, [zones.length]);
+
   const reachedCaseLimit = iCases.length >= FREE_TIER_MAX_ICASES;
+  const reachedZoneLimit = zones.length >= FREE_TIER_MAX_ZONES;
 
   return (
     <div className="h-full overflow-y-auto scrollbar-thin px-8 py-7">
@@ -86,11 +103,41 @@ export default function DashboardView({
                 zone={z}
                 index={i}
                 color={ZONE_PALETTE[i % ZONE_PALETTE.length]}
+                layer={zoneLayers[z.id]}
+                bizSummary={bizSummaries[z.id]}
                 onOpenMap={() => onFocusZone?.(z.id)}
                 onOpenSettings={() => setSettingsZone(z)}
                 relatedICases={iCases.filter((c) => c.zoneIds?.includes(z.id))}
               />
             ))}
+
+            {/* Big + add-zone card — mirrors the i-Cases "Add new" pattern below.
+                Clicking jumps to the Working Areas view where the agent drops a
+                pin and configures radius + activities. Disabled at the free-plan
+                quota (kept consistent with how AreasView caps creation). */}
+            <button
+              type="button"
+              onClick={() => !reachedZoneLimit && onGo("areas")}
+              disabled={reachedZoneLimit}
+              className={`rounded-lg border-2 border-dashed flex flex-col items-center justify-center min-h-[260px] p-5 transition ${
+                reachedZoneLimit
+                  ? "border-slate-800 bg-slate-900/30 cursor-not-allowed"
+                  : "border-slate-700 bg-slate-900/30 hover:border-cyan-500 hover:bg-cyan-500/5"
+              }`}
+              title={reachedZoneLimit ? "Free-plan limit reached — upgrade to Gold" : "Drop a new working zone"}
+            >
+              <div className={`text-5xl ${reachedZoneLimit ? "text-slate-700" : "text-cyan-300"}`}>+</div>
+              <div className={`mt-2 text-sm font-semibold ${reachedZoneLimit ? "text-slate-500" : "text-slate-100"}`}>
+                {reachedZoneLimit ? "Free-plan limit reached" : "Add new zone"}
+              </div>
+              <div className={`text-[11px] mt-1 max-w-[28ch] text-center leading-relaxed ${
+                reachedZoneLimit ? "text-slate-600" : "text-slate-400"
+              }`}>
+                {reachedZoneLimit
+                  ? `You're using ${FREE_TIER_MAX_ZONES} of ${FREE_TIER_MAX_ZONES} zones. Upgrade to Gold for unlimited.`
+                  : "Pick a spot on the map, set a radius, and tag the activities you cover there."}
+              </div>
+            </button>
           </div>
         )}
       </section>
@@ -192,10 +239,21 @@ export default function DashboardView({
 
 // ----- Working-zone snap card ------------------------------------------------
 
-function ZoneSnapCard({ zone, index, color, onOpenMap, onOpenSettings, relatedICases }) {
+function ZoneSnapCard({ zone, index, color, layer, bizSummary, onOpenMap, onOpenSettings, relatedICases }) {
   const matched = useMemo(() => filterPropertiesByZones(PROPERTIES, [zone]), [zone]);
   const counts = useMemo(() => groupByActivity(matched, zone), [matched, zone]);
   const total = matched.length;
+
+  // Resolve filter values → filter metadata for the chips. If the agent has
+  // touched the ribbon (propertyTouched), surface the ACTIVE filter set; if
+  // they haven't, dim the row to indicate "still all default-lit".
+  const activeFilters = (layer?.propertyFilters || []).map(
+    (v) => PROPERTY_FILTER_BY_VALUE[v],
+  ).filter(Boolean);
+  const propertyTouched = !!layer?.propertyTouched;
+  const propertyOn = !!layer?.propertyOn;
+  const bizCategory = bizSummary?.category;
+  const bizCatLabel = BUSINESS_CATEGORIES.find((c) => c.value === bizCategory)?.label || bizCategory;
 
   return (
     <div className="text-left rounded-lg overflow-hidden border border-slate-700 bg-slate-900/40 hover:border-slate-500 hover:shadow-lg hover:shadow-cyan-500/10 transition group">
@@ -274,6 +332,64 @@ function ZoneSnapCard({ zone, index, color, onOpenMap, onOpenSettings, relatedIC
             {matched.length > 4 ? (
               <div className="text-[10px] text-slate-500 ml-3">
                 + {matched.length - 4} more in this zone
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+
+        {/* Selected property types — only shown when the Property layer is on
+            for this zone. Greyed out until the agent has actually touched the
+            ribbon (otherwise we're just echoing the default-lit state). */}
+        {propertyOn ? (
+          <div className="mt-3 pt-2 border-t border-slate-800">
+            <div className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold mb-1.5">
+              Selected properties · {activeFilters.length}
+              {!propertyTouched ? <span className="ml-1 normal-case tracking-normal text-slate-600">(default — all lit)</span> : null}
+            </div>
+            <div className="flex flex-wrap gap-1">
+              {activeFilters.length === 0 ? (
+                <span className="text-[10px] text-slate-500 italic">No types selected</span>
+              ) : (
+                activeFilters.slice(0, 6).map((f) => (
+                  <span
+                    key={f.value}
+                    className={`text-[10px] px-1.5 py-0.5 rounded border ${
+                      propertyTouched ? "" : "opacity-60"
+                    }`}
+                    style={{
+                      borderColor: `${f.color}66`,
+                      background: `${f.color}1f`,
+                      color: f.color,
+                    }}
+                  >
+                    {f.icon} {f.label}
+                  </span>
+                ))
+              )}
+              {activeFilters.length > 6 ? (
+                <span className="text-[10px] text-slate-500">+{activeFilters.length - 6}</span>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
+
+        {/* Searched business activity — shown once a Business analysis has run
+            for this zone. Pulls from the slim summary cached in localStorage. */}
+        {bizSummary ? (
+          <div className="mt-2 pt-2 border-t border-slate-800">
+            <div className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold mb-1.5">
+              Searched activity
+            </div>
+            <div className="flex items-center gap-2 text-[11px] text-slate-200">
+              <span className="text-base">📊</span>
+              <span className="truncate flex-1">{bizCatLabel || "—"}</span>
+              <span className="text-amber-300 tabular-nums" title="Gold">🥇 {bizSummary.goldCount || 0}</span>
+              <span className="text-slate-300 tabular-nums" title="Silver">🥈 {bizSummary.silverCount || 0}</span>
+              <span className="text-amber-700 tabular-nums" title="Bronze">🥉 {bizSummary.bronzeCount || 0}</span>
+            </div>
+            {bizSummary.analyzedAt ? (
+              <div className="text-[9.5px] text-slate-500 mt-1">
+                Last analysed {new Date(bizSummary.analyzedAt).toLocaleDateString()}
               </div>
             ) : null}
           </div>
