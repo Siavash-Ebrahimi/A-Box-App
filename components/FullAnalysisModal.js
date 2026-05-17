@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import AnalysisPieChart from "./AnalysisPieChart";
+import TranslateButtons from "./TranslateButtons";
 
 const REPORT_SECTION_ORDER = [
   "Area Analysis",
@@ -20,7 +21,15 @@ export default function FullAnalysisModal({ result, category, location, onClose 
   // Render into a React portal directly under document.body. This makes the modal
   // a SIBLING of the page content rather than a deep descendant, which lets the
   // print CSS cleanly hide everything else with display:none (no layout gaps).
+  // All hooks must run on EVERY render in the same order. We were calling
+  // useMemo / useState below an `if (!mounted) return null` early-return,
+  // which broke the rules of hooks the moment `mounted` flipped from false
+  // to true. Compute the section data unconditionally up here, run every
+  // hook in a fixed order, THEN allow the early return.
   const [mounted, setMounted] = useState(false);
+  const [translatedBundle, setTranslatedBundle] = useState(null);  // {before:[], final}
+  const [rtl, setRtl] = useState(false);
+
   useEffect(() => {
     setMounted(true);
     function onKey(e) {
@@ -33,12 +42,11 @@ export default function FullAnalysisModal({ result, category, location, onClose 
       document.body.style.overflow = "";
     };
   }, [onClose]);
-  if (!mounted) return null;
 
-  const top = result?.gold?.[0] || result?.silver?.[0] || result?.bronze?.[0] || null;
   const allSections = orderedSections(result?.report?.sections || []);
-  // Split out the Final Recommendation section so we can merge it visually with the
-  // numbered Recommended Spots into one combined "IV. Final Recommendation" section.
+  // Split out the Final Recommendation section so we can merge it visually
+  // with the numbered Recommended Spots into one combined "IV. Final
+  // Recommendation" section.
   const finalIdx = allSections.findIndex((s) =>
     s.heading.toLowerCase().includes("final recommendation"),
   );
@@ -46,6 +54,40 @@ export default function FullAnalysisModal({ result, category, location, onClose 
   const finalRecSection = finalIdx >= 0 ? allSections[finalIdx] : null;
   const sectionsAfterFinal = finalIdx >= 0 ? allSections.slice(finalIdx + 1) : [];
   const generatedAt = new Date().toLocaleString();
+  const top = result?.gold?.[0] || result?.silver?.[0] || result?.bronze?.[0] || null;
+
+  // Translation surface — translate ALL section bodies in one round-trip so
+  // the EN/AR/FA toggle keeps the report internally consistent. Headings
+  // stay in English (they're short labels).
+  const originalBundle = useMemo(() => {
+    return JSON.stringify({
+      before: sectionsBeforeFinal.map((s) => s.body || ""),
+      final: finalRecSection?.body || "",
+    });
+  }, [sectionsBeforeFinal, finalRecSection]);
+
+  // Early-return goes AFTER every hook above, so the order is stable.
+  if (!mounted) return null;
+
+  function handleTranslated(translatedText, _lang, isRtl) {
+    setRtl(isRtl);
+    if (!isRtl) { setTranslatedBundle(null); return; }
+    // Try to parse the bundle back; if the LLM didn't preserve JSON shape,
+    // dump everything into a single "before[0]" cell so something still shows.
+    try {
+      const parsed = JSON.parse(translatedText);
+      if (parsed && Array.isArray(parsed.before)) { setTranslatedBundle(parsed); return; }
+    } catch {/* fall through */}
+    setTranslatedBundle({ before: [translatedText], final: "" });
+  }
+  function bodyForBefore(i, original) {
+    if (!rtl || !translatedBundle) return original;
+    return translatedBundle.before[i] || original;
+  }
+  function bodyForFinal(original) {
+    if (!rtl || !translatedBundle) return original;
+    return translatedBundle.final || original;
+  }
 
   return createPortal(
     <div
@@ -71,14 +113,17 @@ export default function FullAnalysisModal({ result, category, location, onClose 
               {location?.city || "Selected location"} · {humanCategory(category)} · generated {generatedAt}
             </p>
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="text-slate-400 hover:text-slate-100 text-lg w-8 h-8 rounded hover:bg-slate-800 transition flex items-center justify-center"
-            aria-label="Close"
-          >
-            ✕
-          </button>
+          <div className="flex items-center gap-2 shrink-0">
+            <TranslateButtons text={originalBundle} onTranslated={handleTranslated} compact />
+            <button
+              type="button"
+              onClick={onClose}
+              className="text-slate-400 hover:text-slate-100 text-lg w-8 h-8 rounded hover:bg-slate-800 transition flex items-center justify-center"
+              aria-label="Close"
+            >
+              ✕
+            </button>
+          </div>
         </header>
 
         {/* Print-only header (visible only on the printed PDF/page). */}
@@ -98,8 +143,13 @@ export default function FullAnalysisModal({ result, category, location, onClose 
               <h2 className="text-amber-300 font-semibold text-base mb-2">
                 {romanFor(i)}. {s.heading}
               </h2>
-              <div className="text-[13.5px] text-slate-200 leading-relaxed">
-                {paragraphsWithBold(s.body)}
+              <div
+                dir={rtl ? "rtl" : "ltr"}
+                className="text-[13.5px] text-slate-200 leading-relaxed"
+              >
+                {rtl
+                  ? <div className="whitespace-pre-wrap">{bodyForBefore(i, s.body)}</div>
+                  : paragraphsWithBold(s.body)}
               </div>
             </section>
           ))}
@@ -111,8 +161,13 @@ export default function FullAnalysisModal({ result, category, location, onClose 
                 {romanFor(sectionsBeforeFinal.length)}. Final Recommendation
               </h2>
               {finalRecSection ? (
-                <div className="text-[13.5px] text-slate-200 leading-relaxed mb-4">
-                  {paragraphsWithBold(finalRecSection.body)}
+                <div
+                  dir={rtl ? "rtl" : "ltr"}
+                  className="text-[13.5px] text-slate-200 leading-relaxed mb-4"
+                >
+                  {rtl
+                    ? <div className="whitespace-pre-wrap">{bodyForFinal(finalRecSection.body)}</div>
+                    : paragraphsWithBold(finalRecSection.body)}
                 </div>
               ) : null}
 

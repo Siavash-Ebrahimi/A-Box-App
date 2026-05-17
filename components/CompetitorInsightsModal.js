@@ -1,11 +1,18 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
+import TranslateButtons from "./TranslateButtons";
 
 // Modal dialog opened when the user clicks "More details" under Competitor Insights.
 // Shows the longer "details" body of the LLM-generated competitor success analysis.
 
 export default function CompetitorInsightsModal({ insights, category, location, onClose }) {
+  // Translation surface — `shown` is the text currently rendered (defaults to
+  // the English original, swaps to AR/FA via the TranslateButtons header).
+  const [shown, setShown] = useState(insights?.details || "");
+  const [rtl, setRtl] = useState(false);
+  useEffect(() => { setShown(insights?.details || ""); setRtl(false); }, [insights?.details]);
+
   useEffect(() => {
     function onKey(e) {
       if (e.key === "Escape") onClose();
@@ -37,19 +44,29 @@ export default function CompetitorInsightsModal({ insights, category, location, 
               Why these businesses are thriving in {location?.city || "this area"}
             </p>
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="text-slate-400 hover:text-slate-100 text-lg w-7 h-7 rounded hover:bg-slate-800 transition flex items-center justify-center"
-            aria-label="Close"
-          >
-            ✕
-          </button>
+          <div className="flex items-center gap-2 shrink-0">
+            <TranslateButtons
+              text={insights?.details || ""}
+              onTranslated={(t, _lang, isRtl) => { setShown(t); setRtl(isRtl); }}
+              compact
+            />
+            <button
+              type="button"
+              onClick={onClose}
+              className="text-slate-400 hover:text-slate-100 text-lg w-7 h-7 rounded hover:bg-slate-800 transition flex items-center justify-center"
+              aria-label="Close"
+            >
+              ✕
+            </button>
+          </div>
         </header>
 
         <div className="px-5 py-4 max-h-[60vh] overflow-y-auto scrollbar-thin">
-          <div className="text-sm text-slate-200 leading-relaxed whitespace-pre-line">
-            {insights.details}
+          <div
+            dir={rtl ? "rtl" : "ltr"}
+            className="text-sm text-slate-200 leading-relaxed whitespace-pre-line"
+          >
+            {shown}
           </div>
           {insights.source && insights.source !== "template" ? (
             <div className="mt-4 text-[10px] text-slate-500">analysis by {insights.source}</div>

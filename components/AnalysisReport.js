@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import FullAnalysisModal from "./FullAnalysisModal";
+import TranslateButtons from "./TranslateButtons";
 
 const REPORT_SECTION_ORDER = [
   "Area Analysis",
@@ -83,21 +84,33 @@ export default function AnalysisReport({ result, category, loading, location }) 
 // First-paragraph preview of the report (Area Analysis), with a button that opens the
 // full Business Analysis in a modal (pie chart + all 4 sections + Print/PDF).
 function ReportPreview({ sections, onShowFull }) {
-  if (!sections || sections.length === 0) return null;
-
+  // Hooks must run before any conditional return — keep them at the top.
   // Prefer Area Analysis as the preview; fall back to whatever is first.
-  const area = sections.find((s) => s.heading.toLowerCase().includes("area")) || sections[0];
-  const firstParagraph = (area.body || "").split(/\n\n+/)[0] || area.body || "";
+  const area = sections?.find((s) => s.heading.toLowerCase().includes("area")) || sections?.[0];
+  const firstParagraph = area ? ((area.body || "").split(/\n\n+/)[0] || area.body || "") : "";
+  const [shown, setShown] = useState(firstParagraph);
+  const [rtl, setRtl] = useState(false);
+  useEffect(() => { setShown(firstParagraph); setRtl(false); }, [firstParagraph]);
+
+  if (!sections || sections.length === 0) return null;
 
   return (
     <section className="p-4 rounded-lg border border-slate-700 bg-slate-900/40">
-      <div className="flex items-center justify-between mb-2">
+      <div className="flex items-center justify-between mb-2 gap-2">
         <h3 className="text-[10px] uppercase tracking-wider text-amber-300 font-semibold">
           Business Analysis
         </h3>
+        <TranslateButtons
+          text={firstParagraph}
+          onTranslated={(t, _lang, isRtl) => { setShown(t); setRtl(isRtl); }}
+          compact
+        />
       </div>
-      <div className="text-[12.5px] text-slate-200 leading-relaxed clamp-4">
-        {boldSpans(firstParagraph)}
+      <div
+        dir={rtl ? "rtl" : "ltr"}
+        className="text-[12.5px] text-slate-200 leading-relaxed clamp-4"
+      >
+        {rtl ? shown : boldSpans(shown)}
       </div>
       <button
         type="button"

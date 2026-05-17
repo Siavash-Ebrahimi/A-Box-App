@@ -1,63 +1,84 @@
 "use client";
 
-// "Automation Studio" — the i-Case workspace.
+// Automation Studio for one i-Case — node-based flow editor.
 //
 // Layout:
-//   ┌──────────────────────────────────────────────────────────────────────┐
-//   │ Header: ← Back · Title (rename inline) · Save indicator · Delete    │
-//   ├──────────────┬────────────────────────────────────┬────────────────────┤
-//   │ Tool library │ Canvas (rule cards stack)          │ Scope picker       │
-//   │ (categorised │                                    │ (zones + props)    │
-//   │ buttons)     │                                    │                    │
-//   ├──────────────┴────────────────────────────────────┴────────────────────┤
-//   │ Footer: free-form scenario notes textarea                            │
-//   └──────────────────────────────────────────────────────────────────────┘
+//   ┌─────────────────────────────────────────────────────────────────────┐
+//   │ Header: ← Back · Title (rename inline) · stats · ✕ Delete           │
+//   ├─────────────┬───────────────────────────────────┬───────────────────┤
+//   │ Sources +   │ Flow canvas (drag-and-drop nodes, │ Inspector for the │
+//   │ Tools tabs  │ click-to-connect with edges)      │ selected node     │
+//   │ (drag from  │                                   │ + AI chat surface │
+//   │  here)      │                                   │                   │
+//   └─────────────┴───────────────────────────────────┴───────────────────┘
 //
-// All changes auto-save via onPatch. Drag-and-drop is intentionally skipped —
-// click-to-add is faster, leaner, and equally expressive for the MVP demo.
+// State:
+//   iCase.flow = { nodes: [...], edges: [...] } — persisted via onPatch.
+//   Backward-compatible: any iCase missing `flow` gets an empty default.
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import {
+  loadFavourites,
+  loadFavoriteRecommendations,
+} from "@/lib/agent/storage";
 import { PROPERTIES } from "@/lib/agent/mockProperties";
-import { metersBetween } from "@/lib/agent/distance";
-import { RULES, rulesByCategory } from "@/lib/agent/iCaseRules";
-import { AI_AGENT_LIST } from "@/lib/agent/aiAgents";
-import { PERSONA_LIST } from "@/lib/agent/personas";
+import { loadUserProperties } from "@/lib/property/userProperties";
+import { loadUserBusinesses } from "@/lib/business/userBusinesses";
+import { emptyFlow, makeSourceNode, makeToolNode, canConnect, TOOL_NODES_BY_KIND } from "@/lib/agent/iCaseFlow";
+import FlowSidebar from "./FlowSidebar";
+import FlowCanvas from "./FlowCanvas";
+import FlowInspector from "./FlowInspector";
+import FlowZoneRibbon from "./FlowZoneRibbon";
+import FlowAgent from "./FlowAgent";
+import TranslateButtons from "@/components/TranslateButtons";
 
-export default function ICaseWorkspace({ iCase, zones, scopedProperties, onPatch, onDelete, onBack }) {
+// Default persona used when posting AI requests through /api/agent-chat —
+// the route requires a personaKey and falls back to a templated reply when
+// the LLM is unreachable, so the workspace never feels broken offline.
+const DEFAULT_AI_PERSONA = "buyer_marina";
+
+export default function ICaseWorkspace({ iCase, zones, onPatch, onDelete, onBack }) {
   const [editingName, setEditingName] = useState(false);
   const [nameDraft, setNameDraft] = useState(iCase.name);
   const [descDraft, setDescDraft] = useState(iCase.description || "");
+  const [selectedNodeId, setSelectedNodeId] = useState(null);
+  // Ref to the FlowAgent so the header "🤖 AI Agent" button can open it.
+  const agentRef = useRef(null);
+  // Running state for the AI Compare tool — drives the node pulse animation
+  // on the canvas + the "Running…" button state in the inspector.
+  const [runningNodeId, setRunningNodeId] = useState(null);
+  // Last-finished comparison report — shown in a portal modal when set.
+  const [reportText, setReportText] = useState(null);
+  const [reportMeta, setReportMeta] = useState(null);  // { items: [...], nodeId, finishedAt }
 
-  const scopedZoneIds = new Set(iCase.zoneIds || []);
-  const allZonesScoped = scopedZoneIds.size === zones.length && zones.length > 0;
-  const selectedPropIds = new Set(iCase.selectedPropertyIds || []);
+  // Sources fed into the sidebar + ribbon. We keep BOTH a "savedProperties"
+  // list (just the agent's favourited pins — used by tools and the inspector)
+  // AND a wider "allProperties" list (every pin built-in + user-added — used
+  // by the zone ribbon's subcategory tray so it's never empty).
+  const [savedProperties, setSavedProperties] = useState([]);
+  const [allProperties, setAllProperties] = useState([]);
+  const [favIds, setFavIds] = useState(() => new Set());
+  const [savedRecsByZone, setSavedRecsByZone] = useState({});
+  const [userBusinesses, setUserBusinesses] = useState([]);
+  useEffect(() => {
+    const fids = loadFavourites();
+    const all = [...PROPERTIES, ...loadUserProperties()];
+    setFavIds(fids);
+    setAllProperties(all);
+    setSavedProperties(all.filter((p) => fids.has(p.id)));
+    setSavedRecsByZone(loadFavoriteRecommendations());
+    setUserBusinesses(loadUserBusinesses());
+  }, []);
 
-  // Properties that live inside ANY scoped zone — the "add to scope" list on the right.
-  const availableProperties = useMemo(() => {
-    if (!zones || zones.length === 0) return [];
-    const targetZones = allZonesScoped || scopedZoneIds.size === 0
-      ? zones
-      : zones.filter((z) => scopedZoneIds.has(z.id));
-    if (targetZones.length === 0) return [];
-    const out = [];
-    const seen = new Set();
-    for (const z of targetZones) {
-      for (const p of PROPERTIES) {
-        if (seen.has(p.id)) continue;
-        if (metersBetween(p.lat, p.lng, z.lat, z.lng) > z.radius) continue;
-        const zoneActs = z.activities || [];
-        if (zoneActs.length > 0) {
-          const acts = p.activities || [];
-          if (!zoneActs.some((a) => acts.includes(a))) continue;
-        }
-        seen.add(p.id);
-        out.push(p);
-      }
-    }
-    return out;
-  }, [zones, allZonesScoped, [...scopedZoneIds].join(",")]);
+  const flow = useMemo(() => {
+    const f = iCase.flow || emptyFlow();
+    return {
+      nodes: Array.isArray(f.nodes) ? f.nodes : [],
+      edges: Array.isArray(f.edges) ? f.edges : [],
+    };
+  }, [iCase.flow]);
 
-  // ---- handlers ----
   function commitName() {
     const next = nameDraft.trim() || iCase.name;
     onPatch({ name: next });
@@ -66,61 +87,311 @@ export default function ICaseWorkspace({ iCase, zones, scopedProperties, onPatch
   function commitDescription() {
     onPatch({ description: descDraft });
   }
-
-  function toggleZone(zoneId) {
-    const next = new Set(scopedZoneIds);
-    if (next.has(zoneId)) next.delete(zoneId);
-    else next.add(zoneId);
-    onPatch({ zoneIds: [...next] });
-  }
-  function selectAllZones() { onPatch({ zoneIds: zones.map((z) => z.id) }); }
-  function clearZones()     { onPatch({ zoneIds: [] }); }
-
-  function toggleProperty(propId) {
-    const next = new Set(selectedPropIds);
-    if (next.has(propId)) next.delete(propId);
-    else next.add(propId);
-    onPatch({ selectedPropertyIds: [...next] });
+  function handleFlowChange(nextFlow) {
+    onPatch({ flow: nextFlow });
   }
 
-  function addRule(toolKey) {
-    const tool = RULES[toolKey];
-    if (!tool) return;
-    const newRule = {
-      id: `r_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-      toolKey,
-      recipient: tool.recipientDefault || null,
-      note: "",
+  // Add / remove a zone from this i-Case (writes to iCase.zoneIds — same
+  // field the dashboard reads to show "linked i-Cases" on each zone card).
+  function addZoneToCase(zoneId) {
+    const next = [...new Set([...(iCase.zoneIds || []), zoneId])];
+    onPatch({ zoneIds: next });
+  }
+  function removeZoneFromCase(zoneId) {
+    onPatch({ zoneIds: (iCase.zoneIds || []).filter((id) => id !== zoneId) });
+  }
+
+  // Compute a "next free spot" on the canvas so quick-adds + AI-spawned
+  // nodes don't pile up on top of each other. Simple grid layout: start
+  // at (120, 120) and step right then down.
+  function nextSlot(existingNodes) {
+    const COL = 220, ROW = 110;
+    let i = existingNodes.length;
+    return { x: 120 + (i % 4) * COL, y: 120 + Math.floor(i / 4) * ROW };
+  }
+
+  // Quick-add from the ribbon — drops a single source node at the next
+  // available slot. The payload shape matches what FlowSidebar's drag
+  // cards stash; we just bypass the drag-and-drop dance.
+  function quickAddNode(payload) {
+    if (!payload?.nodeKind) return;
+    const pos = nextSlot(flow.nodes);
+    let node = null;
+    if (payload.nodeKind === "source") {
+      node = makeSourceNode({
+        kind: payload.sourceKind,
+        refId: payload.refId,
+        zoneId: payload.zoneId,
+        label: payload.label,
+        sub: payload.sub,
+        color: payload.color,
+      }, pos);
+    } else if (payload.nodeKind === "tool") {
+      node = makeToolNode(payload.toolKind, pos);
+    }
+    if (!node) return;
+    handleFlowChange({ ...flow, nodes: [...flow.nodes, node] });
+    setSelectedNodeId(node.id);
+  }
+
+  // ---- AI orchestrator action executor ----
+  //
+  // The /api/icase-agent endpoint returns a list of actions. We apply them
+  // sequentially, tracking each new node's id by its index so subsequent
+  // `connect` actions can reference earlier additions by zero-based slot.
+  function executeAgentActions(actions) {
+    if (!Array.isArray(actions) || actions.length === 0) return;
+    const newOnes = [];           // indexes resolved to actual node ids
+    let nextFlow = { ...flow, nodes: [...flow.nodes], edges: [...flow.edges] };
+    let nextZoneIds = [...(iCase.zoneIds || [])];
+
+    for (const a of actions) {
+      const type = a?.type;
+      if (!type) continue;
+
+      if (type === "add_zone") {
+        if (a.zoneId && !nextZoneIds.includes(a.zoneId)) nextZoneIds.push(a.zoneId);
+        continue;
+      }
+
+      if (type === "add_zone_source") {
+        const z = zones.find((zz) => zz.id === a.zoneId);
+        if (!z) continue;
+        const zoneIdx = zones.findIndex((zz) => zz.id === a.zoneId);
+        const pos = nextSlot(nextFlow.nodes);
+        const node = makeSourceNode({
+          kind: "zone", refId: z.id, zoneId: z.id,
+          label: `Zone ${zoneIdx + 1} · ${z.label}`,
+          sub: "Whole zone",
+          color: "#a855f7",
+        }, pos);
+        nextFlow.nodes.push(node);
+        newOnes.push(node.id);
+        if (!nextZoneIds.includes(z.id)) nextZoneIds.push(z.id);
+        continue;
+      }
+
+      if (type === "add_source") {
+        const sourceKind = a.sourceKind;
+        if (sourceKind !== "property" && sourceKind !== "recommendation") continue;
+        // Look up the referenced item so we can label it nicely.
+        let label = a.refId, sub = "", color = "#f59e0b";
+        if (sourceKind === "property") {
+          const p = savedProperties.find((x) => x.id === a.refId);
+          if (p) { label = p.title; sub = p.building || p.area || ""; color = "#f59e0b"; }
+        } else {
+          const list = savedRecsByZone[a.zoneId] || [];
+          const r = list.find((x) => x.id === a.refId);
+          if (r) { label = r.street; sub = `${r.tier?.toUpperCase()} · ${Math.round(r.score)}`; color = "#06b6d4"; }
+        }
+        const pos = nextSlot(nextFlow.nodes);
+        const node = makeSourceNode({
+          kind: sourceKind, refId: a.refId, zoneId: a.zoneId,
+          label, sub, color,
+        }, pos);
+        nextFlow.nodes.push(node);
+        newOnes.push(node.id);
+        continue;
+      }
+
+      if (type === "add_tool") {
+        const kind = a.toolKind;
+        if (!TOOL_NODES_BY_KIND[kind]) continue;
+        const pos = nextSlot(nextFlow.nodes);
+        const node = makeToolNode(kind, pos);
+        if (!node) continue;
+        nextFlow.nodes.push(node);
+        newOnes.push(node.id);
+        continue;
+      }
+
+      if (type === "connect") {
+        const fromId = newOnes[a.fromIdx];
+        const toId = newOnes[a.toIdx];
+        if (canConnect(nextFlow.nodes, nextFlow.edges, fromId, toId)) {
+          nextFlow.edges.push({
+            id: `e_${Date.now().toString(36)}_${nextFlow.edges.length}`,
+            source: fromId, target: toId,
+          });
+        }
+        continue;
+      }
+
+      // (run_compare is handled at the workspace level after the flow is
+      // committed — see below.)
+    }
+
+    // Commit zone changes + flow in one onPatch so they persist together.
+    if (nextZoneIds.length !== (iCase.zoneIds || []).length) {
+      onPatch({ zoneIds: nextZoneIds, flow: nextFlow });
+    } else {
+      handleFlowChange(nextFlow);
+    }
+
+    // Process any post-commit run_compare actions.
+    for (const a of actions) {
+      if (a?.type !== "run_compare") continue;
+      const id = newOnes[a.nodeIdx] || nextFlow.nodes[nextFlow.nodes.length - 1]?.id;
+      const node = nextFlow.nodes.find((n) => n.id === id);
+      if (!node || node.kind !== "ai_compare") continue;
+      // Gather upstream context lines and fire.
+      const upstreamIds = nextFlow.edges.filter((e) => e.target === id).map((e) => e.source);
+      const upstream = upstreamIds.map((i) => nextFlow.nodes.find((n) => n.id === i)).filter(Boolean);
+      const lines = buildContextLinesForCompare(upstream, savedProperties, savedRecsByZone, zones);
+      if (lines.length >= 2) runCompare(id, lines);
+    }
+  }
+
+  // ---- Generic tool runner ----
+  //
+  // Drives the per-node Re-run button on the canvas + the Run buttons in the
+  // Inspector for the 4 non-Compare featured tools (Find Property, Analyse
+  // Business, Suggest Business, Vending Finder). Each tool gets its own
+  // prompt template; the response is stored on node.data.lastResult so the
+  // expanded node body can show it inline, and the running state pulses the
+  // node on the canvas while the request is in flight.
+  async function runTool(nodeId) {
+    const node = flow.nodes.find((n) => n.id === nodeId);
+    if (!node) return;
+    if (node.kind === "ai_compare") {
+      // Compare has its own multi-source path (with the report modal).
+      const incoming = flow.edges.filter((e) => e.target === nodeId).map((e) => e.source);
+      const upstream = incoming.map((id) => flow.nodes.find((n) => n.id === id)).filter(Boolean);
+      const lines = buildContextLinesForCompare(upstream, savedProperties, savedRecsByZone, zones);
+      if (lines.length < 2) return;
+      return runCompare(nodeId, lines);
+    }
+
+    // Build a prompt + context lines for this tool kind.
+    const incoming = flow.edges.filter((e) => e.target === nodeId).map((e) => e.source);
+    const upstream = incoming.map((id) => flow.nodes.find((n) => n.id === id)).filter(Boolean);
+    const contextLines = buildContextLinesForCompare(upstream, savedProperties, savedRecsByZone, zones);
+    const promptByKind = {
+      ai_find_property:
+        `You are a senior real-estate advisor in Dubai. The agent's brief is below.\n` +
+        `From the connected zone(s), rank up to 8 candidate properties that best match the brief.\n` +
+        `For each, give a 1-line "why" and a confidence score 1-10. End with a short overall comment.\n\n` +
+        `BRIEF:\n${(node.data?.brief || "(no brief — assume general comfort + value).").trim()}\n\n` +
+        `CONNECTED ITEMS:\n${contextLines.join("\n") || "(none connected — say so and ask)"}\n`,
+      ai_analyze_business:
+        `You are a senior business-concept analyst. The agent has connected a business + location data below.\n` +
+        `Write a tight analysis: (a) what the business currently is, (b) how it fits its location and zone character,\n` +
+        `(c) likely customers, (d) main risks, (e) 3 concrete improvements that would lift revenue.\n\n` +
+        `CONNECTED ITEMS:\n${contextLines.join("\n") || "(none connected)"}\n`,
+      ai_suggest_business:
+        `You are a Dubai retail-strategy consultant. For the connected zone(s), suggest the strongest business\n` +
+        `concepts to open there. Use a statistical, evidence-backed style. Structure your reply as:\n` +
+        `  1. Zone snapshot (footfall drivers, demographics, anchors).\n` +
+        `  2. Top 5 business concepts ranked, each with rationale + ideal size/format + risk.\n` +
+        `  3. Concepts to AVOID and why.\n\n` +
+        `CONNECTED ITEMS:\n${contextLines.join("\n") || "(none connected)"}\n`,
+      ai_vending_finder:
+        `You are a vending-machine placement specialist. For the connected zone(s), output:\n` +
+        `  1. The 5–8 best STREETS or specific spots inside the zone to place vending machines (with reasoning).\n` +
+        `  2. For each spot, recommend a vending-machine MODEL category that fits (e.g. "hot drinks + snacks",\n` +
+        `     "ice-cream / frozen", "PPE + over-the-counter pharmacy", "cold drinks", "fresh food"), justified.\n` +
+        `Mention any spots to AVOID (low footfall, vandalism risk).\n\n` +
+        `CONNECTED ITEMS:\n${contextLines.join("\n") || "(none connected)"}\n`,
+      ai_analysis:
+        `You are an analyst. Run an analysis on the connected items per the prompt below.\n\n` +
+        `PROMPT: ${(node.data?.prompt || "Analyse the items and suggest the best next step.").trim()}\n\n` +
+        `CONNECTED ITEMS:\n${contextLines.join("\n") || "(none connected)"}\n`,
     };
-    onPatch({ rules: [...(iCase.rules || []), newRule] });
-  }
-  function updateRule(ruleId, patch) {
-    onPatch({
-      rules: (iCase.rules || []).map((r) => (r.id === ruleId ? { ...r, ...patch } : r)),
-    });
-  }
-  function removeRule(ruleId) {
-    onPatch({ rules: (iCase.rules || []).filter((r) => r.id !== ruleId) });
-  }
-  function moveRule(ruleId, dir) {
-    const arr = [...(iCase.rules || [])];
-    const idx = arr.findIndex((r) => r.id === ruleId);
-    if (idx < 0) return;
-    const j = idx + dir;
-    if (j < 0 || j >= arr.length) return;
-    [arr[idx], arr[j]] = [arr[j], arr[idx]];
-    onPatch({ rules: arr });
+    const prompt = promptByKind[node.kind];
+    if (!prompt) return; // Other tool kinds (triggers/conditions/notify) aren't runnable here.
+
+    setRunningNodeId(nodeId);
+    let resultText = null;
+    try {
+      const res = await fetch("/api/agent-chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          personaKey: DEFAULT_AI_PERSONA,
+          messages: [{ role: "user", content: prompt }],
+        }),
+      });
+      const data = await res.json();
+      resultText = data?.text || "(No text response — try again or check your API key.)";
+    } catch (e) {
+      resultText = "Network error — please retry once your connection comes back.";
+    }
+    // Persist the result on the node so the expanded body + Inspector both show it.
+    const next = {
+      ...flow,
+      nodes: flow.nodes.map((n) =>
+        n.id === nodeId
+          ? { ...n, data: { ...n.data, lastResult: resultText, lastRunAt: Date.now(), expanded: true } }
+          : n,
+      ),
+    };
+    onPatch({ flow: next });
+    setRunningNodeId(null);
   }
 
-  function commitNotes(value) { onPatch({ workspaceNotes: value }); }
+  // Run the AI Compare tool: posts to /api/agent-chat with the connected
+  // sources inlined as context, then shows the response in a modal. Drives
+  // the pulse animation on the node throughout.
+  async function runCompare(nodeId, contextLines) {
+    if (!Array.isArray(contextLines) || contextLines.length < 2) return;
+    setRunningNodeId(nodeId);
+    setReportText(null);
 
-  const ruleCount = iCase.rules?.length || 0;
-  const propCount = selectedPropIds.size;
-  const zoneCount = scopedZoneIds.size;
+    const prompt = [
+      "You are a senior Dubai real-estate analyst.",
+      "Write a PROFESSIONAL side-by-side comparison report of the items below.",
+      "Structure the report with these clearly-labelled sections:",
+      "  1. Overview",
+      "  2. Quick-stats table (price / size / location / type — markdown table)",
+      "  3. Pros & cons of each item (use bullet lists)",
+      "  4. Ideal target buyer profile for each",
+      "  5. Risk factors and unknowns",
+      "  6. Final recommendation (rank them, explain why)",
+      "",
+      "Use clean markdown. Be specific. Quote numbers from the inputs.",
+      "",
+      "Items to compare:",
+      ...contextLines,
+    ].join("\n");
+
+    try {
+      const res = await fetch("/api/agent-chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          personaKey: DEFAULT_AI_PERSONA,
+          messages: [{ role: "user", content: prompt }],
+        }),
+      });
+      const data = await res.json();
+      const text = data?.text || "(The AI returned no text. Try again — if it keeps happening, set OPENROUTER_API_KEY in .env.local.)";
+      setReportText(text);
+      setReportMeta({ items: contextLines, nodeId, finishedAt: Date.now() });
+
+      // Persist lastRunAt on the node so the inspector can show "Last run …".
+      const nextFlow = {
+        ...flow,
+        nodes: flow.nodes.map((n) =>
+          n.id === nodeId ? { ...n, data: { ...n.data, lastRunAt: Date.now() } } : n,
+        ),
+      };
+      onPatch({ flow: nextFlow });
+    } catch (e) {
+      setReportText(
+        "Network error while contacting the AI. We'll wait for your connection to come back — please retry when it does.",
+      );
+      setReportMeta({ items: contextLines, nodeId, finishedAt: Date.now(), error: true });
+    } finally {
+      setRunningNodeId(null);
+    }
+  }
+
+  const nodeCount = flow.nodes.length;
+  const edgeCount = flow.edges.length;
 
   return (
     <div className="h-screen flex flex-col bg-slate-950 text-slate-100">
-      {/* ---------- Header ---------- */}
+      {/* Header */}
       <header className="px-5 py-3 border-b border-slate-800 flex items-center gap-3">
         <button
           type="button"
@@ -138,7 +409,10 @@ export default function ICaseWorkspace({ iCase, zones, scopedProperties, onPatch
               value={nameDraft}
               onChange={(e) => setNameDraft(e.target.value)}
               onBlur={commitName}
-              onKeyDown={(e) => { if (e.key === "Enter") commitName(); if (e.key === "Escape") { setNameDraft(iCase.name); setEditingName(false); } }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") commitName();
+                if (e.key === "Escape") { setNameDraft(iCase.name); setEditingName(false); }
+              }}
               autoFocus
               className="bg-slate-900 border border-slate-700 rounded px-2 py-0.5 text-sm font-semibold focus:outline-none focus:border-amber-500"
             />
@@ -152,16 +426,26 @@ export default function ICaseWorkspace({ iCase, zones, scopedProperties, onPatch
               {iCase.name}
             </button>
           )}
-          <span className="text-[10px] text-slate-500 uppercase tracking-wider">· i-Case Workspace</span>
+          <span className="text-[10px] text-slate-500 uppercase tracking-wider">· Flow Studio</span>
         </div>
 
         <div className="text-[10.5px] text-slate-500 hidden md:flex items-center gap-3 tabular-nums">
-          <span>📍 {zoneCount}{allZonesScoped ? " (all)" : ""}</span>
-          <span>🏠 {propCount}</span>
-          <span>⚡ {ruleCount} rule{ruleCount === 1 ? "" : "s"}</span>
+          <span title="Nodes on canvas">🧩 {nodeCount}</span>
+          <span title="Connections">🪢 {edgeCount}</span>
           <span className="text-emerald-400">✓ auto-saved</span>
         </div>
 
+        {/* AI Agent header shortcut — same as the bottom-right launcher,
+            for agents who skim the top bar first. */}
+        <button
+          type="button"
+          onClick={() => agentRef.current?.open()}
+          className="text-[11px] px-2.5 py-1.5 rounded border border-emerald-500/50 bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-200 font-semibold transition flex items-center gap-1.5"
+          title="Open the AI Flow Agent — it builds the flow for you by chat or voice"
+        >
+          <span>🤖</span>
+          <span>AI Agent</span>
+        </button>
         <button
           type="button"
           onClick={onDelete}
@@ -172,8 +456,8 @@ export default function ICaseWorkspace({ iCase, zones, scopedProperties, onPatch
         </button>
       </header>
 
-      {/* ---------- Description strip ---------- */}
-      <div className="px-5 py-2.5 border-b border-slate-800 bg-slate-900/30">
+      {/* One-line description */}
+      <div className="px-5 py-2 border-b border-slate-800 bg-slate-900/30">
         <textarea
           value={descDraft}
           onChange={(e) => setDescDraft(e.target.value)}
@@ -184,468 +468,202 @@ export default function ICaseWorkspace({ iCase, zones, scopedProperties, onPatch
         />
       </div>
 
-      {/* ---------- 3-column body ---------- */}
+      {/* 3-column body */}
       <div className="flex-1 flex min-h-0">
-        {/* Left: tool library */}
-        <ToolLibrary onAddRule={addRule} />
+        {/* Tools palette only — zones moved to the top ribbon. */}
+        <FlowSidebar />
 
-        {/* Center: canvas */}
-        <Canvas
+        {/* Centre column: zone ribbon → canvas → floating AI agent */}
+        <div className="flex-1 min-w-0 flex flex-col relative">
+          <FlowZoneRibbon
+            zones={zones}
+            allProperties={allProperties}
+            favouriteIds={favIds}
+            savedRecsByZone={savedRecsByZone}
+            userBusinesses={userBusinesses}
+            onAutoAddToCase={addZoneToCase}
+          />
+          <FlowCanvas
+            flow={flow}
+            selectedNodeId={selectedNodeId}
+            runningNodeId={runningNodeId}
+            onChange={handleFlowChange}
+            onSelectNode={setSelectedNodeId}
+            onRunNode={runTool}
+          />
+          {/* Floating AI agent (chat + voice). Renders inside the centre
+              column so the launcher sits at the canvas's bottom-right. */}
+          <FlowAgent
+            ref={agentRef}
+            iCase={iCase}
+            flow={flow}
+            zones={zones}
+            savedProperties={savedProperties}
+            savedRecsByZone={savedRecsByZone}
+            onExecuteActions={executeAgentActions}
+          />
+        </div>
+
+        <FlowInspector
           iCase={iCase}
+          flow={flow}
+          selectedNodeId={selectedNodeId}
           zones={zones}
-          scopedProperties={scopedProperties}
-          onRemoveRule={removeRule}
-          onUpdateRule={updateRule}
-          onMoveRule={moveRule}
-          onAddRule={addRule}
-        />
-
-        {/* Right: scope picker */}
-        <ScopePicker
-          zones={zones}
-          scopedZoneIds={scopedZoneIds}
-          allZonesScoped={allZonesScoped}
-          availableProperties={availableProperties}
-          selectedPropIds={selectedPropIds}
-          onToggleZone={toggleZone}
-          onSelectAllZones={selectAllZones}
-          onClearZones={clearZones}
-          onToggleProperty={toggleProperty}
+          savedProperties={savedProperties}
+          savedRecsByZone={savedRecsByZone}
+          runningNodeId={runningNodeId}
+          onChange={handleFlowChange}
+          onSelectNode={setSelectedNodeId}
+          onRunCompare={runCompare}
+          onRunTool={runTool}
         />
       </div>
 
-      {/* ---------- Footer notes ---------- */}
-      <footer className="border-t border-slate-800 bg-slate-950 px-5 py-2.5">
-        <div className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold mb-1">
-          Scenario notes (free-form)
-        </div>
-        <textarea
-          defaultValue={iCase.workspaceNotes || ""}
-          onBlur={(e) => commitNotes(e.target.value)}
-          placeholder='e.g. "Run this every weekday morning; escalate to Sam if no client response by 2pm…"'
-          rows={2}
-          className="w-full bg-slate-900 border border-slate-700 rounded px-2.5 py-1.5 text-[12.5px] text-slate-200 placeholder-slate-600 focus:outline-none focus:border-amber-500 resize-none"
+      {/* AI Compare report modal — shown once the comparison finishes. */}
+      {reportText ? (
+        <CompareReportModal
+          text={reportText}
+          meta={reportMeta}
+          onClose={() => { setReportText(null); setReportMeta(null); }}
         />
-      </footer>
+      ) : null}
     </div>
   );
 }
 
-// ============================================================================
-// Tool library (left column)
-// ============================================================================
-function ToolLibrary({ onAddRule }) {
-  const groups = rulesByCategory();
-  return (
-    <aside className="w-[240px] shrink-0 border-r border-slate-800 bg-slate-950 overflow-y-auto scrollbar-thin">
-      <div className="px-3 py-3 border-b border-slate-800">
-        <div className="text-[10px] uppercase tracking-wider text-slate-400 font-semibold">
-          Tool library
-        </div>
-        <div className="text-[10.5px] text-slate-500 mt-0.5 leading-snug">
-          Click any tool to drop a rule onto the canvas.
-        </div>
-      </div>
-
-      {groups.map((g) => (
-        <section key={g.key} className="px-3 py-3 border-b border-slate-800 space-y-1">
-          <div className="text-[9.5px] uppercase tracking-[0.15em] font-semibold mb-1.5"
-               style={{ color: g.color }}>
-            {g.label}
-          </div>
-          {g.rules.map((r) => (
-            <button
-              key={r.key}
-              type="button"
-              onClick={() => onAddRule(r.key)}
-              className="w-full text-left px-2 py-1.5 rounded border border-slate-800 bg-slate-900/40 hover:border-slate-500 hover:bg-slate-900 transition group"
-              title={r.summary}
-            >
-              <div className="flex items-center gap-2">
-                <span className="text-base shrink-0">{r.icon}</span>
-                <span className="text-[11.5px] font-medium text-slate-100 leading-tight">{r.label}</span>
-              </div>
-              <div className="text-[10px] text-slate-500 mt-0.5 line-clamp-2 leading-snug">
-                {r.summary}
-              </div>
-            </button>
-          ))}
-        </section>
-      ))}
-    </aside>
-  );
+// Build comparison context lines for upstream nodes. Mirrors the
+// FlowInspector helper but lives here so the AI-orchestrator path (which
+// can fire run_compare immediately after wiring) doesn't need to round-trip
+// through the inspector.
+function buildContextLinesForCompare(upstream, savedProperties, savedRecsByZone, zones) {
+  const lines = [];
+  upstream.forEach((u) => {
+    if (u.kind === "property") {
+      const p = savedProperties.find((x) => x.id === u.refId);
+      if (!p) { lines.push("[property missing]"); return; }
+      lines.push(
+        `PROPERTY "${p.title}" — ${p.building || ""}${p.area ? `, ${p.area}` : ""}. Type: ${p.type}. ${p.beds || "Studio"} BR / ${p.baths || 1} bath, ${Number(p.area_sqft || 0).toLocaleString()} ft². ${p.listing === "rent" ? `Rent AED ${Number(p.price).toLocaleString()}/year` : `Sale AED ${Number(p.price).toLocaleString()}`}.`,
+      );
+    } else if (u.kind === "recommendation") {
+      const list = savedRecsByZone[u.data?.zoneId] || [];
+      const r = list.find((x) => x.id === u.refId);
+      const zIdx = zones.findIndex((z) => z.id === u.data?.zoneId);
+      if (!r) { lines.push("[recommendation missing]"); return; }
+      lines.push(`RECOMMENDATION "${r.street}" from Zone ${zIdx + 1} — tier ${r.tier?.toUpperCase()}, score ${Math.round(r.score)}.`);
+    } else if (u.kind === "zone") {
+      const z = zones.find((x) => x.id === u.refId);
+      const zIdx = zones.findIndex((x) => x.id === u.refId);
+      if (!z) { lines.push("[zone missing]"); return; }
+      const propsInside = savedProperties.filter(
+        (p) => typeof p.lat === "number" && typeof p.lng === "number"
+          && (((p.lat - z.lat) ** 2 + (p.lng - z.lng) ** 2) ** 0.5 * 111000) <= z.radius,
+      );
+      const recs = savedRecsByZone[z.id] || [];
+      lines.push(`ZONE "${z.label || `Zone ${zIdx + 1}`}" — whole-zone source. Items inside:`);
+      propsInside.forEach((p) => lines.push(
+        `  • Property "${p.title}" — ${p.type}, ${Number(p.area_sqft || 0).toLocaleString()} ft², ${p.listing === "rent" ? `AED ${Number(p.price).toLocaleString()}/yr` : `AED ${Number(p.price).toLocaleString()}`}`,
+      ));
+      recs.forEach((r) => lines.push(`  • Recommendation "${r.street}" — tier ${r.tier?.toUpperCase()}, score ${Math.round(r.score)}`));
+    }
+  });
+  return lines.map((l, i) => `${i + 1}. ${l}`);
 }
 
-// ============================================================================
-// Canvas (center column)
-// ============================================================================
-function Canvas({ iCase, zones, scopedProperties, onAddRule, onRemoveRule, onUpdateRule, onMoveRule }) {
-  const rules = iCase.rules || [];
+// Portal-mounted modal that renders the AI Compare report in a wide,
+// readable card with Print + Close actions. Markdown is shown as-is —
+// agents are usually comfortable scanning it; we save a rendering library
+// for later.
+function CompareReportModal({ text, meta, onClose }) {
+  const [mounted, setMounted] = useState(false);
+  // Translation surface — `shown` is the text currently rendered; defaults to
+  // the English original. TranslateButtons swaps `shown` + `rtl` when the
+  // user picks AR / FA, and reverts to the original on EN.
+  const [shown, setShown] = useState(text);
+  const [rtl, setRtl] = useState(false);
+  useEffect(() => { setShown(text); setRtl(false); }, [text]);
+  useEffect(() => {
+    setMounted(true);
+    function onKey(e) { if (e.key === "Escape") onClose(); }
+    window.addEventListener("keydown", onKey);
+    document.body.style.overflow = "hidden";
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      document.body.style.overflow = "";
+    };
+  }, [onClose]);
+  if (!mounted) return null;
 
-  return (
-    <div className="flex-1 min-w-0 overflow-y-auto scrollbar-thin px-6 py-5">
-      <div className="max-w-2xl mx-auto">
-        <div className="flex items-center justify-between mb-3">
-          <h2 className="text-[11px] uppercase tracking-[0.18em] text-slate-300 font-semibold">
-            Scenario · {rules.length} rule{rules.length === 1 ? "" : "s"}
-          </h2>
-          <div className="text-[10.5px] text-slate-500">
-            Order matters — top to bottom.
-          </div>
-        </div>
+  function handlePrint() { window.print(); }
 
-        {rules.length === 0 ? (
-          <EmptyCanvas onQuickAdd={onAddRule} />
-        ) : (
-          <div className="space-y-2.5">
-            {rules.map((rule, i) => (
-              <RuleCard
-                key={rule.id}
-                rule={rule}
-                index={i}
-                total={rules.length}
-                iCase={iCase}
-                zones={zones}
-                scopedProperties={scopedProperties}
-                onRemove={() => onRemoveRule(rule.id)}
-                onUpdate={(patch) => onUpdateRule(rule.id, patch)}
-                onMoveUp={() => onMoveRule(rule.id, -1)}
-                onMoveDown={() => onMoveRule(rule.id, +1)}
-              />
-            ))}
-            <div className="text-[10.5px] text-slate-500 mt-4 leading-relaxed text-center">
-              Demo MVP: rules are saved per i-Case in your browser. Execution is simulated —
-              no real automations fire yet.
-            </div>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function EmptyCanvas({ onQuickAdd }) {
-  return (
-    <div className="rounded-lg border-2 border-dashed border-slate-700 bg-slate-900/30 p-8 text-center">
-      <div className="text-4xl mb-2">⚡</div>
-      <div className="text-sm font-semibold text-slate-200">No rules yet</div>
-      <div className="text-[12px] text-slate-400 mt-1.5 leading-relaxed max-w-md mx-auto">
-        Pick a tool from the library on the left to add your first rule. Common starts:
-      </div>
-      <div className="flex flex-wrap gap-2 justify-center mt-4">
-        <button
-          type="button"
-          onClick={() => onQuickAdd("customer_enters_zone")}
-          className="text-[11px] px-2.5 py-1.5 rounded border border-cyan-500/40 bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-200 transition"
-        >
-          🚪 When customer enters a zone
-        </button>
-        <button
-          type="button"
-          onClick={() => onQuickAdd("daily_schedule")}
-          className="text-[11px] px-2.5 py-1.5 rounded border border-cyan-500/40 bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-200 transition"
-        >
-          📅 Daily at scheduled time
-        </button>
-        <button
-          type="button"
-          onClick={() => onQuickAdd("notify_me")}
-          className="text-[11px] px-2.5 py-1.5 rounded border border-amber-500/40 bg-amber-500/10 hover:bg-amber-500/20 text-amber-200 transition"
-        >
-          👤 Notify me
-        </button>
-        <button
-          type="button"
-          onClick={() => onQuickAdd("find_relationships")}
-          className="text-[11px] px-2.5 py-1.5 rounded border border-purple-500/40 bg-purple-500/10 hover:bg-purple-500/20 text-purple-200 transition"
-        >
-          🔍 Find cross-zone matches
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function RuleCard({ rule, index, total, iCase, zones, scopedProperties, onRemove, onUpdate, onMoveUp, onMoveDown }) {
-  const tool = RULES[rule.toolKey];
-  if (!tool) {
-    return (
-      <div className="p-2.5 rounded border border-red-700/40 bg-red-900/20 text-red-300 text-[11px]">
-        Unknown rule type: {rule.toolKey}
-        <button onClick={onRemove} className="ml-2 underline">remove</button>
-      </div>
-    );
-  }
-  const catColor = {
-    trigger: "#06b6d4", action: "#a855f7", notification: "#f59e0b", condition: "#10b981",
-  }[tool.category] || "#64748b";
-
-  const scopedZoneNames = (iCase.zoneIds || [])
-    .map((id) => zones.find((z) => z.id === id)?.label)
-    .filter(Boolean);
-  const allZonesScoped = (iCase.zoneIds || []).length === zones.length && zones.length > 0;
-
-  return (
+  return createPortal(
     <div
-      className="rounded-lg border bg-slate-900/40 overflow-hidden"
-      style={{ borderColor: `${catColor}55` }}
+      role="dialog"
+      aria-modal="true"
+      aria-label="AI Comparison report"
+      className="fixed inset-0 z-[1000] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
+      onClick={onClose}
     >
-      <div className="px-3 py-2 flex items-center gap-2.5" style={{ background: `${catColor}15` }}>
-        <span className="text-[10px] tabular-nums text-slate-400 w-5 text-right">{index + 1}.</span>
-        <span className="text-lg shrink-0">{tool.icon}</span>
-        <div className="flex-1 min-w-0">
-          <div className="text-[12.5px] font-semibold text-slate-100 truncate">{tool.label}</div>
-          <div className="text-[10px] uppercase tracking-wider text-slate-500">{tool.category}</div>
-        </div>
-        <div className="flex gap-1">
-          <button
-            type="button"
-            onClick={onMoveUp}
-            disabled={index === 0}
-            className="text-slate-400 hover:text-slate-100 disabled:opacity-30 disabled:cursor-not-allowed px-1.5 py-0.5 rounded hover:bg-slate-800 text-[11px]"
-            title="Move up"
-          >
-            ▲
-          </button>
-          <button
-            type="button"
-            onClick={onMoveDown}
-            disabled={index === total - 1}
-            className="text-slate-400 hover:text-slate-100 disabled:opacity-30 disabled:cursor-not-allowed px-1.5 py-0.5 rounded hover:bg-slate-800 text-[11px]"
-            title="Move down"
-          >
-            ▼
-          </button>
-          <button
-            type="button"
-            onClick={onRemove}
-            className="text-slate-400 hover:text-red-400 px-1.5 py-0.5 rounded hover:bg-slate-800 text-[12px]"
-            title="Remove rule"
-          >
-            ✕
-          </button>
-        </div>
-      </div>
-
-      <div className="p-3 space-y-2 text-[12px]">
-        <div className="text-slate-300 leading-snug">{tool.summary}</div>
-
-        {/* Recipient selector for notification rules */}
-        {tool.category === "notification" ? (
-          <div className="flex items-center gap-2">
-            <span className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold">
-              Recipient
-            </span>
-            <RecipientPicker
-              value={rule.recipient || tool.recipientDefault || "me"}
-              onChange={(r) => onUpdate({ recipient: r })}
-              iCase={iCase}
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="max-w-3xl w-full max-h-[92vh] bg-slate-900 border border-amber-500/40 rounded-xl shadow-2xl overflow-hidden flex flex-col printable-modal"
+      >
+        <header className="px-5 py-3.5 border-b border-slate-800 flex items-start justify-between gap-3 bg-amber-500/10">
+          <div>
+            <div className="text-[10px] uppercase tracking-[0.18em] text-amber-300 font-semibold">
+              AI Compare · Professional report
+            </div>
+            <h2 className="text-base font-semibold text-amber-100 mt-0.5">
+              Side-by-side analysis · {meta?.items?.length || 0} item{(meta?.items?.length || 0) === 1 ? "" : "s"}
+            </h2>
+            {meta?.finishedAt ? (
+              <div className="text-[10.5px] text-amber-200/70 mt-0.5">
+                Generated {new Date(meta.finishedAt).toLocaleString()}
+              </div>
+            ) : null}
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <TranslateButtons
+              text={text}
+              onTranslated={(t, lang, isRtl) => { setShown(t); setRtl(isRtl); }}
+              compact
             />
-          </div>
-        ) : null}
-
-        {/* Scope summary */}
-        <div className="text-[10.5px] text-slate-400 leading-relaxed pt-1.5 border-t border-slate-800">
-          <strong className="text-slate-300">Applies to: </strong>
-          {allZonesScoped
-            ? "all zones"
-            : scopedZoneNames.length > 0
-              ? scopedZoneNames.join(", ")
-              : <em className="text-slate-500">no zones picked yet</em>}
-          {scopedProperties.length > 0 ? (
-            <span className="text-slate-500"> · {scopedProperties.length} pinned propert{scopedProperties.length === 1 ? "y" : "ies"}</span>
-          ) : null}
-        </div>
-
-        {/* Per-rule free-form note */}
-        <input
-          type="text"
-          defaultValue={rule.note || ""}
-          onBlur={(e) => onUpdate({ note: e.target.value })}
-          placeholder="Optional: any extra detail for this rule…"
-          className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1 text-[11.5px] text-slate-200 placeholder-slate-600 focus:outline-none focus:border-amber-500"
-        />
-      </div>
-    </div>
-  );
-}
-
-function RecipientPicker({ value, onChange, iCase }) {
-  const options = [
-    { value: "me", label: "Me (the agent)", color: "#fbbf24" },
-    { value: "agent", label: `AI Agent${iCase.agentKeys?.length ? "" : " (none assigned)"}`, color: "#10b981" },
-    { value: "client", label: `Client${iCase.customerKeys?.length ? "" : " (none assigned)"}`, color: "#06b6d4" },
-  ];
-  return (
-    <div className="flex gap-1">
-      {options.map((o) => {
-        const active = value === o.value;
-        return (
-          <button
-            key={o.value}
-            type="button"
-            onClick={() => onChange(o.value)}
-            className={`text-[10.5px] px-2 py-0.5 rounded border transition ${
-              active
-                ? "border-current font-semibold"
-                : "border-slate-700 bg-slate-900 text-slate-300 hover:border-slate-500"
-            }`}
-            style={active ? { color: o.color, background: `${o.color}18`, borderColor: `${o.color}55` } : undefined}
-          >
-            {o.label}
-          </button>
-        );
-      })}
-    </div>
-  );
-}
-
-// ============================================================================
-// Scope picker (right column)
-// ============================================================================
-function ScopePicker({
-  zones, scopedZoneIds, allZonesScoped, availableProperties,
-  selectedPropIds, onToggleZone, onSelectAllZones, onClearZones, onToggleProperty,
-}) {
-  return (
-    <aside className="w-[280px] shrink-0 border-l border-slate-800 bg-slate-950 overflow-y-auto scrollbar-thin">
-      {/* Zones */}
-      <section className="px-3 py-3 border-b border-slate-800">
-        <div className="flex items-center justify-between mb-2">
-          <div className="text-[10px] uppercase tracking-wider text-slate-400 font-semibold">
-            Zones in scope · {scopedZoneIds.size}
-          </div>
-          <div className="flex gap-1">
             <button
               type="button"
-              onClick={onSelectAllZones}
-              disabled={zones.length === 0}
-              className="text-[9.5px] uppercase tracking-wider text-cyan-300 hover:text-cyan-200 disabled:opacity-30"
+              onClick={handlePrint}
+              className="text-[11px] px-2.5 py-1 rounded border border-amber-500/40 bg-slate-900 hover:bg-slate-800 text-amber-200 transition"
             >
-              All
+              🖨 Print
             </button>
-            <span className="text-slate-700 text-[9.5px]">·</span>
             <button
               type="button"
-              onClick={onClearZones}
-              disabled={scopedZoneIds.size === 0}
-              className="text-[9.5px] uppercase tracking-wider text-slate-500 hover:text-slate-300 disabled:opacity-30"
+              onClick={onClose}
+              className="text-slate-400 hover:text-slate-100 text-lg w-7 h-7 rounded hover:bg-slate-800 flex items-center justify-center"
+              aria-label="Close"
             >
-              None
+              ✕
             </button>
           </div>
+        </header>
+
+        <div
+          className="flex-1 overflow-y-auto scrollbar-thin px-6 py-5 text-[13px] leading-relaxed text-slate-200 whitespace-pre-wrap"
+          dir={rtl ? "rtl" : "ltr"}
+        >
+          {shown}
         </div>
-        {zones.length === 0 ? (
-          <div className="text-[11px] text-slate-500 italic">
-            No working zones saved yet. Add one in the Agent Hub before scoping this i-Case.
-          </div>
-        ) : (
-          <div className="space-y-1">
-            {zones.map((z) => (
-              <ScopeRow
-                key={z.id}
-                icon="📍"
-                color="#3b82f6"
-                name={z.label}
-                sub={z.addressLabel || `${z.lat.toFixed(3)}, ${z.lng.toFixed(3)} · ${(z.radius / 1000).toFixed(1)} km`}
-                checked={scopedZoneIds.has(z.id)}
-                onToggle={() => onToggleZone(z.id)}
-              />
+
+        {meta?.items?.length ? (
+          <footer className="px-6 py-3 border-t border-slate-800 bg-slate-950 text-[10.5px] text-slate-500 leading-relaxed">
+            <strong className="text-slate-300">Sources used:</strong>{" "}
+            {meta.items.map((line, i) => (
+              <span key={i}>
+                {i > 0 ? " · " : ""}#{i + 1}
+              </span>
             ))}
-          </div>
-        )}
-        {allZonesScoped ? (
-          <div className="text-[10px] text-cyan-300 mt-2 leading-relaxed">
-            ✓ All zones selected — rules apply across your entire working coverage.
-          </div>
+          </footer>
         ) : null}
-      </section>
-
-      {/* Properties */}
-      <section className="px-3 py-3 border-b border-slate-800">
-        <div className="text-[10px] uppercase tracking-wider text-slate-400 font-semibold mb-2">
-          Properties · {selectedPropIds.size} pinned
-        </div>
-        <div className="text-[10.5px] text-slate-500 leading-relaxed mb-2">
-          Tap a property to pin it into this i-Case. Only properties inside the scoped zones
-          appear here.
-        </div>
-        {availableProperties.length === 0 ? (
-          <div className="text-[11px] text-slate-500 italic">
-            {zones.length === 0
-              ? "Save a zone first."
-              : scopedZoneIds.size === 0
-                ? "Pick at least one zone to see its properties."
-                : "No properties inside the scoped zones."}
-          </div>
-        ) : (
-          <div className="space-y-1">
-            {availableProperties.slice(0, 50).map((p) => (
-              <ScopeRow
-                key={p.id}
-                icon="🏠"
-                color="#facc15"
-                name={p.title}
-                sub={`${p.building} · ${p.area} · ${
-                  p.listing === "rent"
-                    ? `AED ${Math.round(p.price/1000)}K/y`
-                    : `AED ${(p.price/1_000_000).toFixed(1)}M`
-                }`}
-                checked={selectedPropIds.has(p.id)}
-                onToggle={() => onToggleProperty(p.id)}
-              />
-            ))}
-          </div>
-        )}
-      </section>
-
-      {/* Assignments mirror — read-only summary */}
-      <section className="px-3 py-3 border-b border-slate-800">
-        <div className="text-[10px] uppercase tracking-wider text-slate-400 font-semibold mb-2">
-          Assigned (from create step)
-        </div>
-        <Mirror label="AI Agents" keys={[]} _todo />
-        <div className="text-[10.5px] text-slate-500 leading-relaxed">
-          To assign AI Agents or AI Customers to this i-Case, configure recipient on each
-          notification rule above.
-        </div>
-      </section>
-    </aside>
-  );
-}
-
-function ScopeRow({ icon, color, name, sub, checked, onToggle }) {
-  return (
-    <button
-      type="button"
-      onClick={onToggle}
-      className={`w-full flex items-center gap-2 px-2 py-1.5 rounded border transition text-left ${
-        checked
-          ? "border-amber-500/40 bg-amber-500/10"
-          : "border-slate-800 bg-slate-950 hover:border-slate-600"
-      }`}
-    >
-      <span
-        className="w-6 h-6 rounded-full shrink-0 flex items-center justify-center text-slate-900 font-bold text-[10px]"
-        style={{ background: color }}
-      >
-        {icon}
-      </span>
-      <div className="flex-1 min-w-0">
-        <div className="text-[11.5px] font-medium text-slate-100 truncate">{name}</div>
-        <div className="text-[9.5px] text-slate-500 truncate">{sub}</div>
       </div>
-      <span
-        className={`w-4 h-4 rounded border shrink-0 flex items-center justify-center text-[10px] font-bold ${
-          checked
-            ? "bg-amber-500 border-amber-500 text-slate-900"
-            : "border-slate-600 text-transparent"
-        }`}
-      >
-        ✓
-      </span>
-    </button>
+    </div>,
+    document.body,
   );
 }
-
-function Mirror() { return null; }

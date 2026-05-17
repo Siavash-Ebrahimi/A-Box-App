@@ -12,9 +12,10 @@
 // Renders only when a zone is selected AND has a real (non-summary) result.
 // Hidden below xl screens to keep the layout usable on narrower viewports.
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import StreetCard from "@/components/StreetCard";
 import CompetitorInsightsModal from "@/components/CompetitorInsightsModal";
+import TranslateButtons from "@/components/TranslateButtons";
 import { BUSINESS_CATEGORIES } from "./BusinessRibbon";
 
 export default function ZoneBusinessAnalysisPanel({
@@ -266,19 +267,31 @@ function CompetitorPinIcon() {
 
 function ReportPreview({ report, onShowFull }) {
   const sections = report?.sections || [];
-  if (sections.length === 0) return null;
   const area = sections.find((s) => s.heading?.toLowerCase().includes("area")) || sections[0];
-  const firstParagraph = (area.body || "").split(/\n\n+/)[0] || area.body || "";
+  const firstParagraph = area ? (area.body || "").split(/\n\n+/)[0] || area.body || "" : "";
+  // Translation surface for the preview paragraph.
+  const [shown, setShown] = useState(firstParagraph);
+  const [rtl, setRtl] = useState(false);
+  useEffect(() => { setShown(firstParagraph); setRtl(false); }, [firstParagraph]);
+  if (!area) return null;
   return (
     <section className="p-4 rounded-lg border border-slate-700 bg-slate-900/40">
-      <div className="text-[10px] uppercase tracking-wider text-amber-300 font-semibold mb-2">
-        Business Analysis
+      <div className="flex items-center justify-between mb-2">
+        <div className="text-[10px] uppercase tracking-wider text-amber-300 font-semibold">
+          Business Analysis
+        </div>
+        <TranslateButtons
+          text={firstParagraph}
+          onTranslated={(t, _lang, isRtl) => { setShown(t); setRtl(isRtl); }}
+          compact
+        />
       </div>
       <div
+        dir={rtl ? "rtl" : "ltr"}
         className="text-[12.5px] text-slate-200 leading-relaxed"
         style={{ display: "-webkit-box", WebkitLineClamp: 4, WebkitBoxOrient: "vertical", overflow: "hidden" }}
       >
-        {boldSpans(firstParagraph)}
+        {rtl ? shown : boldSpans(shown)}
       </div>
       <button
         type="button"

@@ -32,6 +32,7 @@ export default function ZoneLayerDrawer({
   onAddBusiness,
   onAnalyzeBusiness,
   onViewBusinessReport,
+  onClearBusinessAnalysis,
   onRemoveZone,
   onFocusZone,
 }) {
@@ -183,7 +184,11 @@ export default function ZoneLayerDrawer({
                   {businessLoading ? "Analysing…" : businessResult ? "↻ Re-analyse" : "▶ Analyse"}
                 </button>
               </div>
-              <BusinessStatus result={businessResult} onViewReport={onViewBusinessReport} />
+              <BusinessStatus
+                result={businessResult}
+                onViewReport={onViewBusinessReport}
+                onClear={onClearBusinessAnalysis}
+              />
               {!layer.businessOn ? (
                 <div className="text-[10px] text-slate-500 italic px-1">
                   Activate the Business layer above to surface the ribbon.
@@ -244,9 +249,10 @@ function LayerRow({ label, icon, color, on, onChangeOn, drawerOpen, onToggleDraw
   );
 }
 
-// One-line summary of the latest business analysis (tier counts + a button
-// to open the full modal report). Shown inside the Business layer drawer.
-function BusinessStatus({ result, onViewReport }) {
+// One-line summary of the latest business analysis (tier counts + buttons
+// to view the full modal report or clear the cached analysis entirely).
+// Shown inside the Business layer drawer.
+function BusinessStatus({ result, onViewReport, onClear }) {
   if (!result) {
     return (
       <div className="text-[10px] text-slate-500 italic px-1">
@@ -281,6 +287,14 @@ function BusinessStatus({ result, onViewReport }) {
         className="ml-auto text-[10px] px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 transition"
       >
         View →
+      </button>
+      <button
+        type="button"
+        onClick={onClear}
+        className="text-[10px] px-1.5 py-0.5 rounded border border-red-700/40 bg-red-900/15 hover:bg-red-900/30 text-red-300 transition"
+        title="Remove this analysis (clears polylines, competitor pins, and the cached report)"
+      >
+        ✕
       </button>
     </div>
   );

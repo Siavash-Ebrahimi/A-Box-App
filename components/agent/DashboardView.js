@@ -266,29 +266,32 @@ export default function DashboardView({
 
 // ----- Working-zone snap card ------------------------------------------------
 
+// Type → emoji + label mapping for the Property section. Falls back to the
+// raw type with a generic pin icon when an unknown type comes through.
+const PROPERTY_TYPE_META = {
+  apartment: { icon: "🏢", label: "Apartment" },
+  villa:     { icon: "🏠", label: "Villa" },
+  townhouse: { icon: "🏘️", label: "Townhouse" },
+  studio:    { icon: "🛏️", label: "Studio" },
+  penthouse: { icon: "🏙️", label: "Penthouse" },
+  office:    { icon: "🏬", label: "Office" },
+  retail:    { icon: "🏪", label: "Shop" },
+  warehouse: { icon: "🏭", label: "Warehouse" },
+  hotel:     { icon: "🏨", label: "Hotel" },
+};
+function typeMeta(p) {
+  return PROPERTY_TYPE_META[p?.type] || { icon: "📍", label: p?.type || "Property" };
+}
+
 function ZoneSnapCard({
   zone, index, color, layer, bizSummary,
   favouriteProperties = [], favouriteRecs = [],
   onOpenMap, onOpenSettings, relatedICases,
 }) {
-  const matched = useMemo(() => filterPropertiesByZones(PROPERTIES, [zone]), [zone]);
-  const counts = useMemo(() => groupByActivity(matched, zone), [matched, zone]);
-  const total = matched.length;
-
-  // Resolve filter values → filter metadata for the chips. If the agent has
-  // touched the ribbon (propertyTouched), surface the ACTIVE filter set; if
-  // they haven't, dim the row to indicate "still all default-lit".
-  const activeFilters = (layer?.propertyFilters || []).map(
-    (v) => PROPERTY_FILTER_BY_VALUE[v],
-  ).filter(Boolean);
-  const propertyTouched = !!layer?.propertyTouched;
-  const propertyOn = !!layer?.propertyOn;
   const bizCategory = bizSummary?.category;
   const bizCatLabel = BUSINESS_CATEGORIES.find((c) => c.value === bizCategory)?.label || bizCategory;
 
   // Favourited properties that physically sit inside this zone's circle.
-  // We compute it here (rather than passing in pre-filtered) so each card
-  // only re-derives its own slice.
   const savedPropsInZone = useMemo(() => {
     if (favouriteProperties.length === 0) return [];
     return favouriteProperties.filter(
@@ -297,9 +300,12 @@ function ZoneSnapCard({
     );
   }, [favouriteProperties, zone.lat, zone.lng, zone.radius]);
 
+  const hasProperty = savedPropsInZone.length > 0;
+  const hasBusiness = !!bizSummary || favouriteRecs.length > 0;
+
   return (
     <div className="text-left rounded-lg overflow-hidden border border-slate-700 bg-slate-900/40 hover:border-slate-500 hover:shadow-lg hover:shadow-cyan-500/10 transition group">
-      {/* Mini map snapshot — click to fly to it in the working-areas view */}
+      {/* Mini map snapshot */}
       <button type="button" onClick={onOpenMap} className="block relative h-24 w-full bg-slate-800 cursor-pointer">
         <ZoneSnapMap zone={zone} color={color} />
         <div className="absolute top-1.5 left-1.5 flex items-center gap-1 z-10">
@@ -321,6 +327,7 @@ function ZoneSnapCard({
 
       {/* Body */}
       <div className="p-2.5">
+        {/* Header */}
         <div className="flex items-start gap-2">
           <div className="flex-1 min-w-0">
             <div className="font-semibold text-[12.5px] text-slate-100 truncate">{zone.label}</div>
@@ -339,167 +346,120 @@ function ZoneSnapCard({
           </button>
         </div>
 
-        {/* Activity-typed counts */}
-        <div className="mt-2.5 flex flex-wrap gap-1.5">
-          {Object.entries(counts).length === 0 ? (
-            <span className="text-[10px] text-slate-500 italic">No properties match this zone</span>
-          ) : (
-            Object.entries(counts).map(([key, n]) => {
-              const meta = ACTIVITY_TYPES.find((a) => a.value === key);
-              if (!meta) return null;
-              return (
-                <span
-                  key={key}
-                  className={`text-[10px] font-semibold px-1.5 py-0.5 rounded border ${meta.color} tabular-nums`}
-                >
-                  {meta.icon} {n} {meta.label}
-                </span>
-              );
-            })
-          )}
-        </div>
-
-        {/* Top matching properties (up to 4) */}
-        {matched.length > 0 ? (
-          <div className="mt-3 space-y-1.5">
-            {matched.slice(0, 4).map((p) => (
-              <div key={p.id} className="flex items-center gap-2 text-[11px]">
-                <span className="text-slate-500 w-3 shrink-0">·</span>
-                <span className="text-slate-200 truncate flex-1">{p.title}</span>
-                <span className="text-amber-300 font-semibold tabular-nums shrink-0">
-                  {formatPrice(p)}
-                </span>
-              </div>
-            ))}
-            {matched.length > 4 ? (
-              <div className="text-[10px] text-slate-500 ml-3">
-                + {matched.length - 4} more in this zone
-              </div>
-            ) : null}
+        {/* Empty state */}
+        {!hasProperty && !hasBusiness ? (
+          <div className="mt-3 text-[10.5px] text-slate-500 italic leading-relaxed">
+            No saved properties or business analysis yet. Open the map to start
+            tagging items in this zone.
           </div>
         ) : null}
 
-        {/* Selected property types — only shown when the Property layer is on
-            for this zone. Greyed out until the agent has actually touched the
-            ribbon (otherwise we're just echoing the default-lit state). */}
-        {propertyOn ? (
-          <div className="mt-3 pt-2 border-t border-slate-800">
-            <div className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold mb-1.5">
-              Selected properties · {activeFilters.length}
-              {!propertyTouched ? <span className="ml-1 normal-case tracking-normal text-slate-600">(default — all lit)</span> : null}
+        {/* PROPERTY section — only when the agent has saved properties here */}
+        {hasProperty ? (
+          <section className="mt-3 pt-2 border-t border-slate-800">
+            <div className="flex items-center justify-between mb-1.5">
+              <div className="text-[10px] uppercase tracking-[0.12em] text-amber-300 font-bold">
+                🏠 Property
+              </div>
+              <span className="text-[9.5px] text-slate-500 tabular-nums">
+                {savedPropsInZone.length} saved
+              </span>
+            </div>
+            <div className="space-y-1">
+              {savedPropsInZone.slice(0, 4).map((p) => {
+                const meta = typeMeta(p);
+                return (
+                  <div key={p.id} className="flex items-center gap-2 text-[11px]">
+                    <span className="text-base shrink-0 leading-none">{meta.icon}</span>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-slate-100 font-medium truncate">{meta.label}</div>
+                      <div className="text-[9.5px] text-slate-500 truncate">{p.title}</div>
+                    </div>
+                    <div className="text-right shrink-0">
+                      <div className="text-[10.5px] text-amber-300 font-semibold tabular-nums">
+                        {Number(p.area_sqft || 0).toLocaleString()} ft²
+                      </div>
+                      <div className="text-[9px] text-slate-500 tabular-nums">
+                        {formatPrice(p)}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+              {savedPropsInZone.length > 4 ? (
+                <div className="text-[9.5px] text-slate-500 pt-0.5">
+                  + {savedPropsInZone.length - 4} more saved
+                </div>
+              ) : null}
+            </div>
+          </section>
+        ) : null}
+
+        {/* BUSINESS section — only when an analysis has run OR recs are saved */}
+        {hasBusiness ? (
+          <section className="mt-3 pt-2 border-t border-slate-800">
+            <div className="flex items-center justify-between mb-1.5">
+              <div className="text-[10px] uppercase tracking-[0.12em] text-cyan-300 font-bold">
+                📊 Business
+              </div>
+              {bizCatLabel ? (
+                <span className="text-[9.5px] text-slate-400 truncate max-w-[140px]">
+                  {bizCatLabel}
+                </span>
+              ) : null}
+            </div>
+            {bizSummary ? (
+              <div className="flex items-center gap-2 text-[11px] text-slate-200">
+                <span className="text-amber-300 tabular-nums" title="Gold streets">🥇 {bizSummary.goldCount || 0}</span>
+                <span className="text-slate-300 tabular-nums" title="Silver streets">🥈 {bizSummary.silverCount || 0}</span>
+                <span className="text-amber-700 tabular-nums" title="Bronze streets">🥉 {bizSummary.bronzeCount || 0}</span>
+                {bizSummary.analyzedAt ? (
+                  <span className="ml-auto text-[9px] text-slate-500">
+                    {new Date(bizSummary.analyzedAt).toLocaleDateString()}
+                  </span>
+                ) : null}
+              </div>
+            ) : null}
+            {favouriteRecs.length > 0 ? (
+              <div className="mt-1.5 space-y-1">
+                {favouriteRecs.slice(0, 3).map((r) => (
+                  <div key={r.id} className="flex items-center gap-1.5 text-[10.5px]">
+                    <span className="text-cyan-300 shrink-0">★</span>
+                    <span className="text-slate-200 truncate flex-1">{r.street}</span>
+                    <span className="text-cyan-300 font-semibold tabular-nums shrink-0">
+                      {r.tier?.[0]?.toUpperCase()}·{Math.round(r.score)}
+                    </span>
+                  </div>
+                ))}
+                {favouriteRecs.length > 3 ? (
+                  <div className="text-[9.5px] text-slate-500">
+                    + {favouriteRecs.length - 3} more saved
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+          </section>
+        ) : null}
+
+        {/* Linked i-Cases (compact) */}
+        {relatedICases && relatedICases.length > 0 ? (
+          <section className="mt-3 pt-2 border-t border-slate-800">
+            <div className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold mb-1">
+              i-Cases · {relatedICases.length}
             </div>
             <div className="flex flex-wrap gap-1">
-              {activeFilters.length === 0 ? (
-                <span className="text-[10px] text-slate-500 italic">No types selected</span>
-              ) : (
-                activeFilters.slice(0, 6).map((f) => (
-                  <span
-                    key={f.value}
-                    className={`text-[10px] px-1.5 py-0.5 rounded border ${
-                      propertyTouched ? "" : "opacity-60"
-                    }`}
-                    style={{
-                      borderColor: `${f.color}66`,
-                      background: `${f.color}1f`,
-                      color: f.color,
-                    }}
-                  >
-                    {f.icon} {f.label}
-                  </span>
-                ))
-              )}
-              {activeFilters.length > 6 ? (
-                <span className="text-[10px] text-slate-500">+{activeFilters.length - 6}</span>
-              ) : null}
-            </div>
-          </div>
-        ) : null}
-
-        {/* Searched business activity — shown once a Business analysis has run
-            for this zone. Pulls from the slim summary cached in localStorage. */}
-        {bizSummary ? (
-          <div className="mt-2 pt-2 border-t border-slate-800">
-            <div className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold mb-1.5">
-              Searched activity
-            </div>
-            <div className="flex items-center gap-2 text-[11px] text-slate-200">
-              <span className="text-base">📊</span>
-              <span className="truncate flex-1">{bizCatLabel || "—"}</span>
-              <span className="text-amber-300 tabular-nums" title="Gold">🥇 {bizSummary.goldCount || 0}</span>
-              <span className="text-slate-300 tabular-nums" title="Silver">🥈 {bizSummary.silverCount || 0}</span>
-              <span className="text-amber-700 tabular-nums" title="Bronze">🥉 {bizSummary.bronzeCount || 0}</span>
-            </div>
-            {bizSummary.analyzedAt ? (
-              <div className="text-[9.5px] text-slate-500 mt-1">
-                Last analysed {new Date(bizSummary.analyzedAt).toLocaleDateString()}
-              </div>
-            ) : null}
-          </div>
-        ) : null}
-
-        {/* Saved property pins inside this zone — fed straight into i-Cases
-            via the `selectedPropertyIds` field on each case. */}
-        {savedPropsInZone.length > 0 ? (
-          <div className="mt-2 pt-2 border-t border-slate-800">
-            <div className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold mb-1.5">
-              ★ Saved properties · {savedPropsInZone.length}
-            </div>
-            <div className="space-y-1">
-              {savedPropsInZone.slice(0, 3).map((p) => (
-                <div key={p.id} className="flex items-center gap-1.5 text-[10.5px]">
-                  <span className="text-amber-300 shrink-0">★</span>
-                  <span className="text-slate-200 truncate flex-1">{p.title}</span>
-                  <span className="text-amber-300 font-semibold tabular-nums shrink-0">
-                    {formatPrice(p)}
-                  </span>
-                </div>
+              {relatedICases.map((c) => (
+                <span
+                  key={c.id}
+                  className="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-200 truncate max-w-[150px]"
+                  title={c.name}
+                >
+                  🤖 {c.name}
+                </span>
               ))}
-              {savedPropsInZone.length > 3 ? (
-                <div className="text-[9.5px] text-slate-500 ml-3">
-                  + {savedPropsInZone.length - 3} more saved
-                </div>
-              ) : null}
             </div>
-            <div className="text-[9px] text-slate-600 mt-1 italic">
-              Available to reference in i-Cases
-            </div>
-          </div>
+          </section>
         ) : null}
-
-        {/* Saved business-analysis recommendation stars (★ from the map). */}
-        {favouriteRecs.length > 0 ? (
-          <div className="mt-2 pt-2 border-t border-slate-800">
-            <div className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold mb-1.5">
-              ★ Saved recommendations · {favouriteRecs.length}
-            </div>
-            <div className="space-y-1">
-              {favouriteRecs.slice(0, 3).map((r) => (
-                <div key={r.id} className="flex items-center gap-1.5 text-[10.5px]">
-                  <span className="text-cyan-300 shrink-0">★</span>
-                  <span className="text-slate-200 truncate flex-1">{r.street}</span>
-                  <span className="text-cyan-300 font-semibold tabular-nums shrink-0">
-                    {r.tier?.[0]?.toUpperCase()}·{Math.round(r.score)}
-                  </span>
-                </div>
-              ))}
-              {favouriteRecs.length > 3 ? (
-                <div className="text-[9.5px] text-slate-500 ml-3">
-                  + {favouriteRecs.length - 3} more saved
-                </div>
-              ) : null}
-            </div>
-            <div className="text-[9px] text-slate-600 mt-1 italic">
-              Available to reference in i-Cases
-            </div>
-          </div>
-        ) : null}
-
-        {/* Assignments + linked i-Cases */}
-        <Assignments
-          agentKeys={zone.assignedAgents}
-          customerKeys={zone.assignedCustomers}
-          relatedICases={relatedICases}
-        />
 
         <button
           type="button"

@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { formatPrice } from "@/lib/agent/mockProperties";
+import TranslateButtons from "@/components/TranslateButtons";
 
 // AI comparison report modal — fetched from /api/property-compare on open and
 // rendered as 8 stacked sections, with the two property summaries pinned at the
@@ -11,10 +12,17 @@ import { formatPrice } from "@/lib/agent/mockProperties";
 // the Business Analysis modal.
 
 export default function CompareReport({ propertyA, propertyB, onClose }) {
+  // All hooks at the top — early returns come after the hook block to keep
+  // the call order stable across renders.
   const [mounted, setMounted] = useState(false);
   const [loading, setLoading] = useState(true);
   const [report, setReport] = useState(null);
   const [error, setError] = useState(null);
+  // Translation surface — re-translates ALL section bodies in one bundle
+  // round-trip when the user picks AR/FA, so the report stays internally
+  // consistent.
+  const [translatedBundle, setTranslatedBundle] = useState(null); // string[] | null
+  const [rtl, setRtl] = useState(false);
 
   useEffect(() => {
     setMounted(true);
@@ -52,6 +60,29 @@ export default function CompareReport({ propertyA, propertyB, onClose }) {
     return () => { cancelled = true; };
   }, [propertyA?.id, propertyB?.id]);
 
+  const sections = report?.sections || [];
+  const originalBundle = useMemo(
+    () => JSON.stringify(sections.map((s) => s.body || "")),
+    [sections],
+  );
+
+  function handleTranslated(translatedText, _lang, isRtl) {
+    setRtl(isRtl);
+    if (!isRtl) { setTranslatedBundle(null); return; }
+    try {
+      const parsed = JSON.parse(translatedText);
+      if (Array.isArray(parsed)) { setTranslatedBundle(parsed); return; }
+    } catch {/* fall through */}
+    // Fallback: dump the whole translated blob into section 0 so something shows.
+    const fb = new Array(sections.length).fill("");
+    fb[0] = translatedText;
+    setTranslatedBundle(fb);
+  }
+  function bodyFor(i, original) {
+    if (!rtl || !translatedBundle) return original;
+    return translatedBundle[i] || original;
+  }
+
   if (!mounted) return null;
   const generatedAt = new Date().toLocaleString();
 
@@ -76,14 +107,19 @@ export default function CompareReport({ propertyA, propertyB, onClose }) {
             </div>
             <p className="text-[11px] text-slate-500 mt-0.5">Generated {generatedAt}</p>
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="text-slate-400 hover:text-slate-100 text-lg w-8 h-8 rounded hover:bg-slate-800 flex items-center justify-center"
-            aria-label="Close"
-          >
-            ✕
-          </button>
+          <div className="flex items-center gap-2 shrink-0">
+            {report ? (
+              <TranslateButtons text={originalBundle} onTranslated={handleTranslated} compact />
+            ) : null}
+            <button
+              type="button"
+              onClick={onClose}
+              className="text-slate-400 hover:text-slate-100 text-lg w-8 h-8 rounded hover:bg-slate-800 flex items-center justify-center"
+              aria-label="Close"
+            >
+              ✕
+            </button>
+          </div>
         </header>
 
         {/* Print-only header */}
@@ -122,13 +158,18 @@ export default function CompareReport({ propertyA, propertyB, onClose }) {
             </div>
           ) : (
             <>
-              {(report?.sections || []).map((s, i) => (
+              {sections.map((s, i) => (
                 <section key={i} className="print:break-inside-avoid">
                   <h2 className="text-amber-300 font-semibold text-base mb-2">
                     {roman(i)}. {s.heading}
                   </h2>
-                  <div className="text-[13.5px] text-slate-200 leading-relaxed">
-                    {paragraphsWithBold(s.body)}
+                  <div
+                    dir={rtl ? "rtl" : "ltr"}
+                    className="text-[13.5px] text-slate-200 leading-relaxed"
+                  >
+                    {rtl
+                      ? <div className="whitespace-pre-wrap">{bodyFor(i, s.body)}</div>
+                      : paragraphsWithBold(s.body)}
                   </div>
                 </section>
               ))}

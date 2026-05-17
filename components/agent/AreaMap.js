@@ -19,6 +19,7 @@ import {
   Polyline,
   Popup,
   Tooltip,
+  ZoomControl,
   useMap,
   useMapEvents,
 } from "react-leaflet";
@@ -295,12 +296,17 @@ export default function AreaMap({
       center={[DUBAI_CENTER.lat, DUBAI_CENTER.lng]}
       zoom={11}
       scrollWheelZoom
+      // Disable the default top-left zoom control and remount it at the
+      // bottom-right via <ZoomControl /> below so it doesn't sit on top of the
+      // ribbons stack.
+      zoomControl={false}
       className="h-full w-full"
     >
       <TileLayer
         attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
         url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
       />
+      <ZoomControl position="bottomright" />
 
       <ClickHandler onPick={onPick} />
       <RecenterOnNewZone target={focusTarget} zoom={focusZoom} />
@@ -421,7 +427,7 @@ export default function AreaMap({
             icon={propertyEmojiIcon({ color, emoji, price: shortPrice(p) })}
             zIndexOffset={600}
           >
-            <Popup maxWidth={300}>
+            <Popup maxWidth={360} minWidth={320}>
               <PropertyPopup
                 p={p}
                 filter={filter}
@@ -799,11 +805,40 @@ function RecommendationPopup({ rec, rank, zoneTag, isFavorite, onToggleFavorite 
   );
 }
 
-// Property popup with a favourite (☆/★) toggle button. Lives on the dark
-// Leaflet popup background, so every colour is in the light-text family.
+// Property popup — bigger card with two thumbnail images at the top, then
+// type pill, title, address, price, beds/baths/sqft, features. Images use
+// the property's stored image (if any) plus a second deterministic
+// picsum.photos thumbnail keyed by id so the row is always full.
 function PropertyPopup({ p, filter, isFavourite, onToggleFavourite }) {
+  const primaryImg = p.image || `https://picsum.photos/seed/${encodeURIComponent(p.id || "x")}_a/360/200`;
+  const secondaryImg = `https://picsum.photos/seed/${encodeURIComponent(p.id || "x")}_b/360/200`;
   return (
-    <div style={{ minWidth: 230 }}>
+    <div style={{ width: 320 }}>
+      {/* Image strip — two related shots so the popup feels like a listing
+          preview rather than a tag tooltip. */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4, marginBottom: 8 }}>
+        <img
+          src={primaryImg}
+          alt=""
+          loading="lazy"
+          style={{
+            width: "100%", height: 96, objectFit: "cover",
+            borderRadius: 6, border: "1px solid #1f2937", background: "#0f172a",
+          }}
+          onError={(e) => { e.currentTarget.style.visibility = "hidden"; }}
+        />
+        <img
+          src={secondaryImg}
+          alt=""
+          loading="lazy"
+          style={{
+            width: "100%", height: 96, objectFit: "cover",
+            borderRadius: 6, border: "1px solid #1f2937", background: "#0f172a",
+          }}
+          onError={(e) => { e.currentTarget.style.visibility = "hidden"; }}
+        />
+      </div>
+
       <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 8 }}>
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
@@ -817,7 +852,9 @@ function PropertyPopup({ p, filter, isFavourite, onToggleFavourite }) {
               }}>{filter.icon} {filter.label}</span>
             ) : null}
           </div>
-          <div style={{ fontWeight: 700, fontSize: 13, marginTop: 4, color: "#f1f5f9" }}>{p.title}</div>
+          <div style={{ fontWeight: 700, fontSize: 14, marginTop: 4, color: "#f1f5f9", lineHeight: 1.25 }}>
+            {p.title}
+          </div>
           <div style={{ fontSize: 11, color: "#94a3b8", marginTop: 2 }}>
             {p.building}{p.area ? `, ${p.area}` : ""}
           </div>
@@ -843,7 +880,7 @@ function PropertyPopup({ p, filter, isFavourite, onToggleFavourite }) {
         </button>
       </div>
 
-      <div style={{ fontWeight: 700, color: "#fbbf24", marginTop: 6, fontSize: 13 }}>
+      <div style={{ fontWeight: 700, color: "#fbbf24", marginTop: 6, fontSize: 14 }}>
         {p.listing === "rent"
           ? `AED ${Number(p.price).toLocaleString()}/year`
           : `AED ${Number(p.price).toLocaleString()}`}
@@ -852,11 +889,11 @@ function PropertyPopup({ p, filter, isFavourite, onToggleFavourite }) {
         {p.beds ? `${p.beds} BR` : "Studio"} · {p.baths} bath · {Number(p.area_sqft || 0).toLocaleString()} ft²
       </div>
       {p.features && p.features.length > 0 ? (
-        <div style={{ fontSize: 10.5, color: "#94a3b8", marginTop: 4, lineHeight: 1.4 }}>
+        <div style={{ fontSize: 10.5, color: "#94a3b8", marginTop: 6, lineHeight: 1.4 }}>
           {p.features.slice(0, 6).join(" · ")}
         </div>
       ) : null}
-      <div style={{ fontSize: 10, color: "#64748b", marginTop: 6 }}>
+      <div style={{ fontSize: 10, color: "#64748b", marginTop: 6, paddingTop: 6, borderTop: "1px solid #1f2937" }}>
         📍 {Number(p.lat).toFixed(4)}, {Number(p.lng).toFixed(4)}
       </div>
     </div>

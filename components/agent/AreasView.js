@@ -13,6 +13,9 @@ import {
   loadZoneBusinessSummaries,
   updateZoneBusinessSummary,
   clearZoneBusinessSummary,
+  loadZoneBusinessFull,
+  saveZoneBusinessFull,
+  clearZoneBusinessFull,
   loadFavoriteRecommendations,
   toggleFavoriteRecommendation,
   recommendationKey,
@@ -399,13 +402,23 @@ export default function AreasView({
   const [businessLoading, setBusinessLoading] = useState({});
   const [reportZoneId, setReportZoneId] = useState(null);
 
-  // Restore the slim summaries so the dashboard cards stay accurate after a
-  // navigation between views.
+  // Restore the FULL cached analysis on mount so the map redraws every
+  // polyline, competitor pin, recommendation star, etc. when the agent comes
+  // back to Working Areas. Fall back to the slim summary (just counts) for
+  // any zone whose full snapshot wasn't persisted (e.g. quota exceeded).
   useEffect(() => {
+    const fulls = loadZoneBusinessFull();
     const summaries = loadZoneBusinessSummaries();
-    if (Object.keys(summaries).length === 0) return;
+    if (Object.keys(fulls).length === 0 && Object.keys(summaries).length === 0) return;
     setBusinessResults((curr) => {
       const next = { ...curr };
+      // Full results take priority — restore everything as-is so loading is
+      // marked finished (no spinners) and the map can draw immediately.
+      for (const [zid, full] of Object.entries(fulls)) {
+        if (next[zid]) continue;
+        next[zid] = { ...full, loadingOverview: false, loadingDetails: false };
+      }
+      // Then fill in summary-only placeholders for zones missing a full cache.
       for (const [zid, s] of Object.entries(summaries)) {
         if (next[zid]) continue;
         next[zid] = {
@@ -420,6 +433,23 @@ export default function AreasView({
       return next;
     });
   }, []);
+
+  // Clear an analysis: drops cached result from state + storage so the map
+  // returns to a clean "no analysis" state for this zone. Surfaced from the
+  // Business drawer's ✕ button (see ZoneLayerDrawer).
+  function clearBusinessAnalysis(zoneId) {
+    const z = zones.find((x) => x.id === zoneId);
+    const label = z ? `Zone ${zones.findIndex((zz) => zz.id === zoneId) + 1}` : "this zone";
+    if (!confirm(`Remove the business analysis from ${label}? You can re-run it any time from the Business ribbon.`)) return;
+    setBusinessResults((m) => {
+      const { [zoneId]: _drop, ...rest } = m;
+      return rest;
+    });
+    setBusinessLoading((m) => ({ ...m, [zoneId]: false }));
+    clearZoneBusinessFull(zoneId);
+    clearZoneBusinessSummary(zoneId);
+    if (reportZoneId === zoneId) setReportZoneId(null);
+  }
 
   async function analyzeBusiness(zoneId) {
     const z = zones.find((x) => x.id === zoneId);
@@ -444,11 +474,14 @@ export default function AreasView({
       });
       const phase1Data = await safeJson(phase1, "analysis");
       if (!phase1.ok) throw new Error(phase1Data?.error || `Analysis failed (HTTP ${phase1.status})`);
-      setBusinessResults((m) => ({
-        ...m,
-        [zoneId]: { ...phase1Data, loadingOverview: true, loadingDetails: true },
-      }));
+      const phase1Snapshot = { ...phase1Data, loadingOverview: true, loadingDetails: true };
+      setBusinessResults((m) => ({ ...m, [zoneId]: phase1Snapshot }));
       setBusinessLoading((m) => ({ ...m, [zoneId]: false }));
+
+      // Persist the full Phase-1 snapshot too so a navigation between views
+      // restores the map polylines + competitor pins immediately. Phases 2/3
+      // will overwrite this entry as their data lands.
+      saveZoneBusinessFull(zoneId, phase1Snapshot);
 
       // Persist a slim summary so the dashboard can show it later.
       updateZoneBusinessSummary(zoneId, {
@@ -484,18 +517,19 @@ export default function AreasView({
           setBusinessResults((m) => {
             const prev = m[zoneId];
             if (!prev) return m;
-            return {
-              ...m,
-              [zoneId]: {
-                ...prev,
-                report: data.report || prev.report,
-                competitorInsights: data.competitorInsights || prev.competitorInsights,
-                successFactors: data.successFactors || prev.successFactors,
-                agencies: data.agencies || prev.agencies,
-                loadingOverview: false,
-                overviewError: null,
-              },
+            const merged = {
+              ...prev,
+              report: data.report || prev.report,
+              competitorInsights: data.competitorInsights || prev.competitorInsights,
+              successFactors: data.successFactors || prev.successFactors,
+              agencies: data.agencies || prev.agencies,
+              loadingOverview: false,
+              overviewError: null,
             };
+            // Refresh the full cache so a navigation away/back keeps the
+            // upgraded AI fields.
+            saveZoneBusinessFull(zoneId, merged);
+            return { ...m, [zoneId]: merged };
           });
         })
         .catch((err) => {
@@ -522,21 +556,20 @@ export default function AreasView({
           setBusinessResults((m) => {
             const prev = m[zoneId];
             if (!prev) return m;
-            return {
-              ...m,
-              [zoneId]: {
-                ...prev,
-                gold: (prev.gold || []).map(upgrade),
-                silver: (prev.silver || []).map(upgrade),
-                bronze: (prev.bronze || []).map(upgrade),
-                recommendations: (prev.recommendations || []).map((rec, i) => {
-                  const reason = data.recReasons?.[i];
-                  return reason ? { ...rec, reason: reason.text, reasonSource: reason.source } : rec;
-                }),
-                loadingDetails: false,
-                detailsError: null,
-              },
+            const merged = {
+              ...prev,
+              gold: (prev.gold || []).map(upgrade),
+              silver: (prev.silver || []).map(upgrade),
+              bronze: (prev.bronze || []).map(upgrade),
+              recommendations: (prev.recommendations || []).map((rec, i) => {
+                const reason = data.recReasons?.[i];
+                return reason ? { ...rec, reason: reason.text, reasonSource: reason.source } : rec;
+              }),
+              loadingDetails: false,
+              detailsError: null,
             };
+            saveZoneBusinessFull(zoneId, merged);
+            return { ...m, [zoneId]: merged };
           });
         })
         .catch((err) => {
@@ -586,24 +619,12 @@ export default function AreasView({
       <div className="w-[360px] shrink-0 border-r border-slate-800 bg-slate-950 flex flex-col">
         <PlanBanner used={zones.length} limit={FREE_TIER_MAX_ZONES} />
 
-        {/* Mode controls: + Add Zone button + (in add mode) the pending-zone
-            config panel. */}
-        <div className="px-4 py-3 border-b border-slate-800 space-y-2">
-          {mode !== MODE.ADD ? (
-            <button
-              type="button"
-              onClick={startAddMode}
-              disabled={reachedLimit}
-              className={`w-full text-[12px] font-semibold px-3 py-2 rounded border transition ${
-                reachedLimit
-                  ? "border-slate-800 bg-slate-900 text-slate-600 cursor-not-allowed"
-                  : "border-amber-500/50 bg-amber-500/10 hover:bg-amber-500/20 text-amber-200"
-              }`}
-              title={reachedLimit ? "Free-plan limit reached — upgrade to Gold" : "Click here, then click the map to drop a new zone"}
-            >
-              + Add a new zone
-            </button>
-          ) : (
+        {/* Mode prompt — only visible while actively dropping a new zone. The
+            actual "+ Add a new zone" affordance now lives at the END of the
+            zones list below (styled like the dashboard's "Add new i-Case"
+            dashed card). Keeps the top of the sidebar uncluttered. */}
+        {mode === MODE.ADD ? (
+          <div className="px-4 py-3 border-b border-slate-800">
             <button
               type="button"
               onClick={cancelAddMode}
@@ -611,15 +632,8 @@ export default function AreasView({
             >
               ⏳ Click the map to place · Cancel
             </button>
-          )}
-          {mode === MODE.IDLE && zones.length > 0 ? (
-            <div className="text-[10.5px] text-slate-500 leading-relaxed">
-              Click a zone in the list or on the map to select it. Click ✎ on a
-              card to relocate it. Use <strong>+ Add a new zone</strong> when you
-              want to add another patch.
-            </div>
-          ) : null}
-        </div>
+          </div>
+        ) : null}
 
         {mode === MODE.ADD && pending ? (
           <div className="p-4 border-b border-slate-800">
@@ -698,35 +712,8 @@ export default function AreasView({
 
         {reachedLimit ? <GoldUpsell limit={FREE_TIER_MAX_ZONES} /> : null}
 
-        {/* "Show all my Zones" — pure deselect. Clears the focused zone so
-            every zone's circle is visible on the map cleanly, with no
-            ribbons floating at the top. */}
-        {zones.length > 0 ? (
-          <div className="px-4 py-2.5 border-b border-slate-800">
-            <button
-              type="button"
-              onClick={showAllZonesAction}
-              disabled={!selectedZoneId}
-              className={`w-full text-[11.5px] font-semibold px-3 py-2 rounded border transition ${
-                selectedZoneId
-                  ? "border-cyan-500/40 bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-200"
-                  : "border-slate-800 bg-slate-900/60 text-slate-500 cursor-not-allowed"
-              }`}
-              title={
-                selectedZoneId
-                  ? "Deselect — view all your zones on the map without any ribbon focus."
-                  : "Already showing all zones cleanly. Click a zone below to surface its ribbons."
-              }
-            >
-              🗺️ Show all my Zones
-            </button>
-            <div className="text-[10px] text-slate-500 mt-1 leading-relaxed">
-              {selectedZoneId
-                ? `Currently focusing Zone ${zones.findIndex((z) => z.id === selectedZoneId) + 1}. Click "Show all my Zones" to deselect.`
-                : "No zone is focused — ribbons hidden. Click any zone below to surface its Property + Business ribbons."}
-            </div>
-          </div>
-        ) : null}
+{/* (Removed extra "Select a zone to focus…" line per spec — the floating
+    "Show all my Zones" button on the map already covers this affordance.) */}
 
         <div className="px-4 py-3 border-b border-slate-800 flex items-center justify-between">
           <div className="text-[10px] uppercase tracking-wider text-slate-400 font-semibold">
@@ -743,16 +730,13 @@ export default function AreasView({
             </button>
           ) : null}
         </div>
-        <div className="flex-1 overflow-y-auto scrollbar-thin px-4 py-3 space-y-2">
-          {zones.length === 0 ? (
-            <div className="text-[11px] text-slate-500 leading-relaxed p-3 rounded border border-dashed border-slate-700 bg-slate-900/30">
-              No zones yet. Click <strong>+ Add a new zone</strong> above, then
-              click anywhere on the map to drop a pin.
-            </div>
-          ) : (
-            zones.map((z, i) => (
+        <div className="flex-1 overflow-y-auto scrollbar-thin px-4 py-3">
+          {zones.map((z, i) => (
+            <div key={z.id}>
+              {/* Visible divider between zones — clearer separation than the
+                  previous tight stack. */}
+              {i > 0 ? <div className="my-3 border-t border-slate-800" /> : null}
               <ZoneLayerDrawer
-                key={z.id}
                 zone={z}
                 index={i}
                 layer={layersForRender[z.id] || DEFAULT_ZONE_LAYER}
@@ -772,11 +756,42 @@ export default function AreasView({
                 onAddBusiness={() => startAddBusiness(z.id)}
                 onAnalyzeBusiness={() => analyzeBusiness(z.id)}
                 onViewBusinessReport={() => setReportZoneId(z.id)}
+                onClearBusinessAnalysis={() => clearBusinessAnalysis(z.id)}
                 onRemoveZone={() => onRemoveZone(z.id)}
                 onFocusZone={() => onClearFocus?.()}
               />
-            ))
-          )}
+            </div>
+          ))}
+          {zones.length > 0 ? <div className="my-3 border-t border-slate-800" /> : null}
+
+          {/* Dashed "+ Add a new zone" card — same visual language as the
+              dashboard's "Add new i-Case" CTA. Lives at the END of the zones
+              list so newly-saved zones push above it. */}
+          {mode !== MODE.ADD ? (
+            <button
+              type="button"
+              onClick={startAddMode}
+              disabled={reachedLimit}
+              className={`w-full rounded-lg border-2 border-dashed flex flex-col items-center justify-center min-h-[120px] p-3 transition ${
+                reachedLimit
+                  ? "border-slate-800 bg-slate-900/30 cursor-not-allowed"
+                  : "border-slate-700 bg-slate-900/30 hover:border-amber-500 hover:bg-amber-500/5"
+              }`}
+              title={reachedLimit ? "Free-plan limit reached — upgrade to Gold for unlimited zones" : "Click here, then click the map to drop a new zone"}
+            >
+              <div className={`text-3xl ${reachedLimit ? "text-slate-700" : "text-amber-300"}`}>+</div>
+              <div className={`mt-1 text-[12.5px] font-semibold ${reachedLimit ? "text-slate-500" : "text-slate-100"}`}>
+                {reachedLimit ? "Free-plan limit reached" : zones.length === 0 ? "Add your first zone" : "Add a new zone"}
+              </div>
+              <div className={`text-[10px] mt-1 max-w-[28ch] text-center leading-relaxed ${
+                reachedLimit ? "text-slate-600" : "text-slate-400"
+              }`}>
+                {reachedLimit
+                  ? `Using ${FREE_TIER_MAX_ZONES} of ${FREE_TIER_MAX_ZONES}. Upgrade for unlimited.`
+                  : "Click, then drop a pin on the map."}
+              </div>
+            </button>
+          ) : null}
         </div>
       </div>
 
@@ -818,6 +833,36 @@ export default function AreasView({
           onAddBusiness={startAddBusiness}
           addBusinessModeZoneId={businessPlaceZoneId}
         />
+
+        {/* Floating "Show all my Zones" control — sits at the bottom-left of
+            the map so the affordance is right next to the surface it controls.
+            Shows the current focus and gives a one-click deselect. */}
+        {zones.length > 0 ? (
+          <div className="absolute bottom-4 left-4 z-[500]">
+            <button
+              type="button"
+              onClick={showAllZonesAction}
+              disabled={!selectedZoneId}
+              className={`text-[11.5px] font-semibold px-3 py-2 rounded-lg border shadow-2xl backdrop-blur transition ${
+                selectedZoneId
+                  ? "border-cyan-500/50 bg-slate-900/90 hover:bg-slate-900 text-cyan-200"
+                  : "border-slate-700 bg-slate-900/80 text-slate-400 cursor-not-allowed"
+              }`}
+              title={
+                selectedZoneId
+                  ? "Deselect — view all your zones cleanly with no ribbons."
+                  : "Already showing all zones cleanly. Click a zone in the list to surface its ribbons."
+              }
+            >
+              🗺️ Show all my Zones
+              {selectedZoneId ? (
+                <span className="ml-2 text-[9.5px] uppercase tracking-wider text-cyan-300/80">
+                  · focusing Zone {zones.findIndex((z) => z.id === selectedZoneId) + 1}
+                </span>
+              ) : null}
+            </button>
+          </div>
+        ) : null}
 
         {/* Awaiting-chip hint (per the "tap to reveal" gate) */}
         {awaitingTouchZones.length > 0 && !placeMode && mode !== MODE.ADD ? (
@@ -958,23 +1003,30 @@ async function safeJson(res, label = "request") {
 
 function PlanBanner({ used, limit }) {
   const atLimit = used >= limit;
+  // When the agent has used all their free zones, swap the friendly tagline
+  // for a bold red "quota used" message — and let the dashed + Add a new zone
+  // card render in its disabled state below.
+  if (atLimit) {
+    return (
+      <div className="px-4 py-3 border-b border-red-500/40 bg-red-500/10">
+        <div className="text-[12.5px] font-bold text-red-300 leading-snug">
+          {used} of {limit} free zones selection used
+        </div>
+        <div className="text-[10.5px] text-red-200/70 mt-1 leading-relaxed">
+          Upgrade to Gold (below) for unlimited zones — or remove one to free a slot.
+        </div>
+      </div>
+    );
+  }
   return (
-    <div
-      className={[
-        "px-4 py-3 border-b text-xs leading-snug",
-        atLimit ? "border-amber-500/40 bg-amber-500/10" : "border-slate-800 bg-slate-900/60",
-      ].join(" ")}
-    >
-      <div className="flex items-center gap-2 mb-0.5">
+    <div className="px-4 py-3 border-b border-slate-800 bg-slate-900/60 text-xs leading-snug">
+      <div className="flex items-center gap-2">
         <span className="text-[9px] uppercase tracking-wider font-bold px-1.5 py-0.5 rounded bg-slate-800 text-slate-300">
           Free
         </span>
-        <span className={atLimit ? "text-amber-200 font-semibold" : "text-slate-200"}>
+        <span className="text-slate-200">
           {used} of {limit} zones used
         </span>
-      </div>
-      <div className="text-[11px] text-slate-400">
-        Select a zone to focus its Property & Business ribbons on the map.
       </div>
     </div>
   );
