@@ -31,6 +31,7 @@ export default function FlowInspector({
   onSelectNode,
   onRunCompare,                 // (nodeId, contextLines) => Promise<void>
   onRunTool,                    // (nodeId) => Promise<void> — generic runner for non-compare AI tools
+  onViewToolReport,             // (nodeId) => void — opens the full-screen ToolReportModal
 }) {
   const node = selectedNodeId ? flow.nodes.find((n) => n.id === selectedNodeId) : null;
 
@@ -356,7 +357,7 @@ function ToolInspector({ node, iCase, upstream, onChange }) {
 
 // ---- AI inspector (interactive chat) ------------------------------------
 
-function AIInspector({ node, upstream, zones, savedProperties, savedRecsByZone, running, onChange, onRunCompare, onRunTool }) {
+function AIInspector({ node, upstream, zones, savedProperties, savedRecsByZone, running, onChange, onRunCompare, onRunTool, onViewToolReport }) {
   const family = NODE_FAMILY_META.ai;
   const tool = TOOL_NODES_BY_KIND[node.kind];
 
@@ -391,6 +392,7 @@ function AIInspector({ node, upstream, zones, savedProperties, savedRecsByZone, 
         running={running}
         onChange={onChange}
         onRunTool={onRunTool}
+        onViewToolReport={onViewToolReport}
       />
     );
   }
@@ -426,7 +428,7 @@ function AIInspector({ node, upstream, zones, savedProperties, savedRecsByZone, 
 // last-result text is shown inline so the agent can see what came back
 // without re-opening the canvas node.
 
-function RunnableAIInspector({ node, upstream, running, onChange, onRunTool }) {
+function RunnableAIInspector({ node, upstream, running, onChange, onRunTool, onViewToolReport }) {
   const tool = TOOL_NODES_BY_KIND[node.kind];
   const family = NODE_FAMILY_META.ai;
   const lastResult = node.data?.lastResult;
@@ -590,18 +592,30 @@ function RunnableAIInspector({ node, upstream, running, onChange, onRunTool }) {
         </div>
       ) : null}
 
-      {/* Last result preview — with EN/AR/FA translate buttons */}
+      {/* Last result preview — short scrollable peek inside the inspector,
+          plus a prominent "View full report" button that opens the result in
+          a full-screen window with translate + print controls. */}
       {lastResult ? (
         <div className="mt-3 rounded border border-slate-700 bg-slate-900/50 p-2.5">
-          <div className="flex items-center justify-between mb-1.5 gap-2">
+          <div className="flex items-center justify-between mb-1.5 gap-2 flex-wrap">
             <div className="text-[9.5px] uppercase tracking-wider text-slate-400 font-semibold">
               Last result
             </div>
-            <TranslateButtons
-              text={lastResult}
-              onTranslated={(t, _lang, isRtl) => { setResultShown(t); setResultRtl(isRtl); }}
-              compact
-            />
+            <div className="flex items-center gap-1.5">
+              <TranslateButtons
+                text={lastResult}
+                onTranslated={(t, _lang, isRtl) => { setResultShown(t); setResultRtl(isRtl); }}
+                compact
+              />
+              <button
+                type="button"
+                onClick={() => onViewToolReport?.(node.id)}
+                className="text-[10px] px-2 py-0.5 rounded border border-emerald-500/50 bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-200 font-semibold transition whitespace-nowrap"
+                title="Open the full report in a readable window"
+              >
+                📖 Open full report
+              </button>
+            </div>
           </div>
           <div
             dir={resultRtl ? "rtl" : "ltr"}

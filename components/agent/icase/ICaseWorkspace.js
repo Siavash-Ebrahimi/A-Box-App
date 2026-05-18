@@ -25,13 +25,14 @@ import {
 import { PROPERTIES } from "@/lib/agent/mockProperties";
 import { loadUserProperties } from "@/lib/property/userProperties";
 import { loadUserBusinesses } from "@/lib/business/userBusinesses";
-import { emptyFlow, makeSourceNode, makeToolNode, canConnect, TOOL_NODES_BY_KIND } from "@/lib/agent/iCaseFlow";
+import { emptyFlow, makeSourceNode, makeToolNode, canConnect, TOOL_NODES_BY_KIND, NODE_FAMILY_META } from "@/lib/agent/iCaseFlow";
 import FlowSidebar from "./FlowSidebar";
 import FlowCanvas from "./FlowCanvas";
 import FlowInspector from "./FlowInspector";
 import FlowZoneRibbon from "./FlowZoneRibbon";
 import FlowAgent from "./FlowAgent";
 import TranslateButtons from "@/components/TranslateButtons";
+import ToolReportModal from "./ToolReportModal";
 
 // Default persona used when posting AI requests through /api/agent-chat —
 // the route requires a personaKey and falls back to a templated reply when
@@ -51,6 +52,10 @@ export default function ICaseWorkspace({ iCase, zones, onPatch, onDelete, onBack
   // Last-finished comparison report — shown in a portal modal when set.
   const [reportText, setReportText] = useState(null);
   const [reportMeta, setReportMeta] = useState(null);  // { items: [...], nodeId, finishedAt }
+  // Generic "view full report" for any single-tool node (Find Property,
+  // Analyse Business, Suggest Business, Vending Finder, AI Analysis…).
+  // Stores just the node id; we resolve the live result from the flow.
+  const [viewReportNodeId, setViewReportNodeId] = useState(null);
 
   // Sources fed into the sidebar + ribbon. We keep BOTH a "savedProperties"
   // list (just the agent's favourited pins — used by tools and the inspector)
@@ -490,6 +495,7 @@ export default function ICaseWorkspace({ iCase, zones, onPatch, onDelete, onBack
             onChange={handleFlowChange}
             onSelectNode={setSelectedNodeId}
             onRunNode={runTool}
+            onViewToolReport={(nodeId) => setViewReportNodeId(nodeId)}
           />
           {/* Floating AI agent (chat + voice). Renders inside the centre
               column so the launcher sits at the canvas's bottom-right. */}
@@ -516,6 +522,7 @@ export default function ICaseWorkspace({ iCase, zones, onPatch, onDelete, onBack
           onSelectNode={setSelectedNodeId}
           onRunCompare={runCompare}
           onRunTool={runTool}
+          onViewToolReport={(nodeId) => setViewReportNodeId(nodeId)}
         />
       </div>
 
@@ -527,6 +534,42 @@ export default function ICaseWorkspace({ iCase, zones, onPatch, onDelete, onBack
           onClose={() => { setReportText(null); setReportMeta(null); }}
         />
       ) : null}
+
+      {/* Generic tool-report modal — opened from any non-Compare AI tool's
+          "View full report" button. We resolve the node, its config (brief
+          / prompt) and upstream sources live so the modal always shows the
+          freshest text. */}
+      {(() => {
+        if (!viewReportNodeId) return null;
+        const node = flow.nodes.find((n) => n.id === viewReportNodeId);
+        if (!node) return null;
+        const tool = TOOL_NODES_BY_KIND[node.kind];
+        if (!tool) return null;
+        const family = NODE_FAMILY_META[node.type] || NODE_FAMILY_META.action;
+        const incoming = flow.edges
+          .filter((e) => e.target === node.id)
+          .map((e) => flow.nodes.find((n) => n.id === e.source))
+          .filter(Boolean);
+        const sources = incoming.map((n) => n.data?.label || n.kind);
+        // Per-kind subtitle so the modal header tells the user what was asked.
+        const subtitle =
+          node.kind === "ai_find_property" ? (node.data?.brief || "(no brief supplied)") :
+          node.kind === "ai_vending_finder" ? `Preference: ${node.data?.preferred || "auto"}` :
+          node.kind === "ai_analysis" ? (node.data?.prompt || "(no prompt supplied)") :
+          tool.description;
+        return (
+          <ToolReportModal
+            title={tool.label}
+            subtitle={subtitle}
+            icon={tool.icon}
+            accent={node.data?.color || family.color}
+            text={node.data?.lastResult || ""}
+            generatedAt={node.data?.lastRunAt || null}
+            sources={sources}
+            onClose={() => setViewReportNodeId(null)}
+          />
+        );
+      })()}
     </div>
   );
 }

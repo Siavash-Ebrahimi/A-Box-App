@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from "react";
 import PropertyCard from "./PropertyCard";
+import EshelPropertiesCard from "./EshelPropertiesCard";
 import {
   PROPERTIES,
   PROPERTY_AREAS,
@@ -58,6 +59,10 @@ export default function PropertiesView({
 
       {/* Cards grid */}
       <div className="flex-1 overflow-y-auto scrollbar-thin p-5">
+        {/* Featured brokerage — pinned at the top so it's the first thing
+            an agent sees when they enter the Properties tab. */}
+        <EshelPropertiesCard />
+
         {list.length === 0 ? (
           <div className="text-sm text-slate-500 leading-relaxed text-center max-w-md mx-auto mt-12">
             No properties match these filters.

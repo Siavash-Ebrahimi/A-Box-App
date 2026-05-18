@@ -13,6 +13,7 @@ import AreasView from "@/components/agent/AreasView";
 import PropertiesView from "@/components/agent/PropertiesView";
 import ChatView from "@/components/agent/ChatView";
 import CommonProjectsView from "@/components/agent/CommonProjectsView";
+import InvestmentHubView from "@/components/agent/InvestmentHubView";
 import { PROPERTIES } from "@/lib/agent/mockProperties";
 import { filterPropertiesByZones } from "@/lib/agent/distance";
 import {
@@ -257,6 +258,8 @@ export default function AgentHubPage() {
           />
         ) : view === "common-projects" ? (
           <CommonProjectsView zones={zones} profile={profile} />
+        ) : view === "investment-hub" ? (
+          <InvestmentHubView profile={profile} />
         ) : view === "properties" ? (
           <PropertiesView
             zones={zones}

@@ -31,6 +31,7 @@ export default function FlowCanvas({
   onChange,            // (nextFlow) => void
   onSelectNode,        // (nodeId | null) => void
   onRunNode,           // (nodeId) => Promise<void> — fired by the per-node Re-run button
+  onViewToolReport,    // (nodeId) => void — opens the full-screen ToolReportModal
 }) {
   const canvasRef = useRef(null);
   const [draggingNodeId, setDraggingNodeId] = useState(null);
@@ -251,6 +252,7 @@ export default function FlowCanvas({
               });
             }}
             onRun={onRunNode ? () => onRunNode(n.id) : null}
+            onViewFullReport={onViewToolReport ? () => onViewToolReport(n.id) : null}
           />
         ))}
 
@@ -305,7 +307,7 @@ function portLeft(node) {
 function NodeBox({
   node, selected, running, pendingFromId,
   onSelect, onMouseDownHeader, onStartEdge, onFinishEdge, onDelete,
-  onToggleExpanded, onRun,
+  onToggleExpanded, onRun, onViewFullReport,
 }) {
   const family = NODE_FAMILY_META[node.type] || NODE_FAMILY_META.action;
   const color = node.data?.color || family.color;
@@ -420,7 +422,7 @@ function NodeBox({
               </div>
             )}
             {canRun ? (
-              <div className="flex items-center gap-1.5 mt-2">
+              <div className="flex flex-wrap items-center gap-1.5 mt-2">
                 <button
                   type="button"
                   onClick={(e) => { e.stopPropagation(); onRun(); }}
@@ -433,6 +435,16 @@ function NodeBox({
                 >
                   {running ? "Running…" : lastResult ? "↻ Re-run" : "▶ Run"}
                 </button>
+                {lastResult && onViewFullReport ? (
+                  <button
+                    type="button"
+                    onClick={(e) => { e.stopPropagation(); onViewFullReport(); }}
+                    className="text-[10.5px] px-2 py-1 rounded border border-emerald-500/50 bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-200 font-semibold transition"
+                    title="Open the full report in a readable window (translate + print)"
+                  >
+                    📖 Full
+                  </button>
+                ) : null}
                 <button
                   type="button"
                   onClick={(e) => { e.stopPropagation(); onSelect(); }}
